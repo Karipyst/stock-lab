@@ -67,12 +67,26 @@ def load_price_data(ticker: str, period_value: str) -> pd.DataFrame:
     return df
 
 
-def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
+def get_ma_labels(ma_short: int, ma_mid: int, ma_long: int) -> dict:
+    return {
+        "short": f"MA{ma_short}",
+        "mid": f"MA{ma_mid}",
+        "long": f"MA{ma_long}"
+    }
 
-    df["MA5"] = df["Close"].rolling(5).mean()
-    df["MA25"] = df["Close"].rolling(25).mean()
-    df["MA75"] = df["Close"].rolling(75).mean()
+
+def add_indicators(
+    df: pd.DataFrame,
+    ma_short: int,
+    ma_mid: int,
+    ma_long: int
+) -> pd.DataFrame:
+    df = df.copy()
+    labels = get_ma_labels(ma_short, ma_mid, ma_long)
+
+    df[labels["short"]] = df["Close"].rolling(ma_short).mean()
+    df[labels["mid"]] = df["Close"].rolling(ma_mid).mean()
+    df[labels["long"]] = df["Close"].rolling(ma_long).mean()
 
     df["RSI"] = ta.momentum.RSIIndicator(
         close=df["Close"],
@@ -119,14 +133,35 @@ def price_band_label(value, symbol: str) -> str:
     return "1万円超"
 
 
-def calculate_buy_score(df: pd.DataFrame) -> dict:
-    clean = df.dropna()
+def format_unit_amount(value, symbol: str) -> str:
+    if pd.isna(value) or not yen_symbol(symbol):
+        return "-"
+    return f"{value * 100:,.0f}円"
 
-    if clean.empty or len(clean) < 75:
+
+def validate_ma_values(ma_short: int, ma_mid: int, ma_long: int) -> bool:
+    if not (ma_short < ma_mid < ma_long):
+        st.warning("移動平均は 短期 < 中期 < 長期 になるように設定してください。例：5 / 25 / 75")
+        return False
+    return True
+
+
+def calculate_buy_score(
+    df: pd.DataFrame,
+    ma_short: int,
+    ma_mid: int,
+    ma_long: int
+) -> dict:
+    labels = get_ma_labels(ma_short, ma_mid, ma_long)
+    required = [labels["short"], labels["mid"], labels["long"], "RSI", "MACD_DIFF", "Volume_Ratio", "Return_5d", "Return_20d"]
+
+    clean = df.dropna(subset=required)
+
+    if clean.empty or len(clean) < 2:
         return {
             "score": 0,
             "status": "データ不足",
-            "reasons": ["指標計算に必要なデータが不足しています。"],
+            "reasons": ["指標計算に必要なデータが不足しています。期間を長くするか、移動平均の日数を短くしてください。"],
             "latest": None
         }
 
@@ -137,9 +172,9 @@ def calculate_buy_score(df: pd.DataFrame) -> dict:
     reasons = []
 
     close = latest["Close"]
-    ma5 = latest["MA5"]
-    ma25 = latest["MA25"]
-    ma75 = latest["MA75"]
+    ma_s = latest[labels["short"]]
+    ma_m = latest[labels["mid"]]
+    ma_l = latest[labels["long"]]
     rsi = latest["RSI"]
     macd_diff = latest["MACD_DIFF"]
     prev_macd_diff = prev["MACD_DIFF"]
@@ -147,19 +182,19 @@ def calculate_buy_score(df: pd.DataFrame) -> dict:
     return_5d = latest["Return_5d"]
     return_20d = latest["Return_20d"]
 
-    if close > ma25:
+    if close > ma_m:
         score += 2
-        reasons.append("終値が25日移動平均線を上回っており、中期的には上向きです。")
+        reasons.append(f"終値が{ma_mid}日移動平均線を上回っており、中期的には上向きです。")
     else:
-        reasons.append("終値が25日移動平均線を下回っており、中期的には弱めです。")
+        reasons.append(f"終値が{ma_mid}日移動平均線を下回っており、中期的には弱めです。")
 
-    if ma5 > ma25:
+    if ma_s > ma_m:
         score += 2
-        reasons.append("5日移動平均線が25日移動平均線を上回っており、短期トレンドが改善しています。")
+        reasons.append(f"{ma_short}日移動平均線が{ma_mid}日移動平均線を上回っており、短期トレンドが改善しています。")
 
-    if ma25 > ma75:
+    if ma_m > ma_l:
         score += 2
-        reasons.append("25日移動平均線が75日移動平均線を上回っており、上昇基調が確認できます。")
+        reasons.append(f"{ma_mid}日移動平均線が{ma_long}日移動平均線を上回っており、上昇基調が確認できます。")
 
     if 40 <= rsi <= 65:
         score += 2
@@ -213,7 +248,15 @@ def calculate_buy_score(df: pd.DataFrame) -> dict:
     }
 
 
-def analyze_symbol(symbol: str, name: str, theme: str, period: str) -> dict:
+def analyze_symbol(
+    symbol: str,
+    name: str,
+    theme: str,
+    period: str,
+    ma_short: int,
+    ma_mid: int,
+    ma_long: int
+) -> dict:
     df = load_price_data(symbol, period)
 
     if df.empty:
@@ -233,8 +276,8 @@ def analyze_symbol(symbol: str, name: str, theme: str, period: str) -> dict:
             "reasons": ["データを取得できませんでした。"]
         }
 
-    df = add_indicators(df)
-    result = calculate_buy_score(df)
+    df = add_indicators(df, ma_short, ma_mid, ma_long)
+    result = calculate_buy_score(df, ma_short, ma_mid, ma_long)
     latest = result["latest"]
 
     if latest is None:
@@ -273,7 +316,14 @@ def analyze_symbol(symbol: str, name: str, theme: str, period: str) -> dict:
     }
 
 
-def draw_price_chart(df: pd.DataFrame):
+def draw_price_chart(
+    df: pd.DataFrame,
+    ma_short: int,
+    ma_mid: int,
+    ma_long: int
+):
+    labels = get_ma_labels(ma_short, ma_mid, ma_long)
+
     fig = go.Figure()
 
     fig.add_trace(go.Candlestick(
@@ -285,14 +335,14 @@ def draw_price_chart(df: pd.DataFrame):
         name="ローソク足"
     ))
 
-    fig.add_trace(go.Scatter(x=df.index, y=df["MA5"], name="MA5", mode="lines"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["MA25"], name="MA25", mode="lines"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["MA75"], name="MA75", mode="lines"))
+    fig.add_trace(go.Scatter(x=df.index, y=df[labels["short"]], name=labels["short"], mode="lines"))
+    fig.add_trace(go.Scatter(x=df.index, y=df[labels["mid"]], name=labels["mid"], mode="lines"))
+    fig.add_trace(go.Scatter(x=df.index, y=df[labels["long"]], name=labels["long"], mode="lines"))
 
     fig.update_layout(
-        height=560,
+        height=420,
         xaxis_rangeslider_visible=False,
-        margin=dict(l=20, r=20, t=40, b=20),
+        margin=dict(l=16, r=16, t=32, b=16),
         legend=dict(orientation="h")
     )
 
@@ -303,11 +353,11 @@ def draw_volume_chart(df: pd.DataFrame):
     fig = go.Figure()
 
     fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="出来高"))
-    fig.add_trace(go.Scatter(x=df.index, y=df["Volume_MA20"], name="出来高20日平均", mode="lines"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["Volume_MA20"], name="20日平均", mode="lines"))
 
     fig.update_layout(
-        height=280,
-        margin=dict(l=20, r=20, t=40, b=20),
+        height=220,
+        margin=dict(l=12, r=12, t=28, b=12),
         legend=dict(orientation="h")
     )
 
@@ -318,14 +368,13 @@ def draw_rsi_chart(df: pd.DataFrame):
     fig = go.Figure()
 
     fig.add_trace(go.Scatter(x=df.index, y=df["RSI"], name="RSI", mode="lines"))
-
-    fig.add_hline(y=70, line_dash="dash", annotation_text="70: 買われすぎ目安")
-    fig.add_hline(y=30, line_dash="dash", annotation_text="30: 売られすぎ目安")
+    fig.add_hline(y=70, line_dash="dash", annotation_text="70")
+    fig.add_hline(y=30, line_dash="dash", annotation_text="30")
 
     fig.update_layout(
-        height=280,
+        height=220,
         yaxis=dict(range=[0, 100]),
-        margin=dict(l=20, r=20, t=40, b=20)
+        margin=dict(l=12, r=12, t=28, b=12)
     )
 
     st.plotly_chart(fig, use_container_width=True)
@@ -336,11 +385,11 @@ def draw_macd_chart(df: pd.DataFrame):
 
     fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD", mode="lines"))
     fig.add_trace(go.Scatter(x=df.index, y=df["MACD_SIGNAL"], name="Signal", mode="lines"))
-    fig.add_trace(go.Bar(x=df.index, y=df["MACD_DIFF"], name="MACD差分"))
+    fig.add_trace(go.Bar(x=df.index, y=df["MACD_DIFF"], name="差分"))
 
     fig.update_layout(
-        height=280,
-        margin=dict(l=20, r=20, t=40, b=20),
+        height=220,
+        margin=dict(l=12, r=12, t=28, b=12),
         legend=dict(orientation="h")
     )
 
@@ -411,22 +460,19 @@ def show_beginner_guide():
 | 2.0倍以上 | 大きな材料がある可能性 |
 """)
 
-    with st.expander("移動平均線 MA5 / MA25 / MA75"):
+    with st.expander("移動平均線"):
         st.markdown("""
 ### 移動平均線
 過去の株価の平均値を線にしたものです。
 
-| 指標 | 意味 |
-|---|---|
-| MA5 | 約1週間の短期トレンド |
-| MA25 | 約1か月の中期トレンド |
-| MA75 | 約3か月の長期トレンド |
-
 ### 見方
-- 株価がMA25より上：中期的には強い
-- 株価がMA25より下：中期的には弱い
-- MA5 > MA25 > MA75：上昇トレンド
-- MA5 < MA25 < MA75：下落トレンド
+- 株価が中期移動平均より上：中期的には強い
+- 株価が中期移動平均より下：中期的には弱い
+- 短期 > 中期 > 長期：上昇トレンド
+- 短期 < 中期 < 長期：下落トレンド
+
+このアプリでは、短期・中期・長期の移動平均日数を画面上で変更できます。
+標準設定は 5日 / 25日 / 75日 です。
 """)
 
     with st.expander("RSI"):
@@ -489,35 +535,88 @@ def show_beginner_guide():
 """)
 
 
+def set_mode(mode: str, symbol: str | None = None):
+    st.session_state["mode"] = mode
+    if symbol:
+        st.session_state["selected_symbol"] = symbol
+
+
+def render_common_controls(default_period_index: int = 1):
+    c1, c2, c3, c4 = st.columns([1.2, 1, 1, 1])
+
+    with c1:
+        period = st.selectbox(
+            "表示期間",
+            ["6mo", "1y", "2y", "5y"],
+            index=default_period_index,
+            key="period_select"
+        )
+
+    with c2:
+        ma_short = st.number_input(
+            "短期MA",
+            min_value=1,
+            max_value=100,
+            value=st.session_state.get("ma_short", 5),
+            step=1,
+            key="ma_short_input"
+        )
+
+    with c3:
+        ma_mid = st.number_input(
+            "中期MA",
+            min_value=2,
+            max_value=200,
+            value=st.session_state.get("ma_mid", 25),
+            step=1,
+            key="ma_mid_input"
+        )
+
+    with c4:
+        ma_long = st.number_input(
+            "長期MA",
+            min_value=3,
+            max_value=300,
+            value=st.session_state.get("ma_long", 75),
+            step=1,
+            key="ma_long_input"
+        )
+
+    st.session_state["ma_short"] = int(ma_short)
+    st.session_state["ma_mid"] = int(ma_mid)
+    st.session_state["ma_long"] = int(ma_long)
+
+    return period, int(ma_short), int(ma_mid), int(ma_long)
+
+
 watchlist = load_watchlist()
 
-st.sidebar.header("表示設定")
+if "mode" not in st.session_state:
+    st.session_state["mode"] = "ランキング"
 
-period = st.sidebar.selectbox(
-    "取得期間",
-    ["6mo", "1y", "2y", "5y"],
-    index=1
-)
+if "selected_symbol" not in st.session_state:
+    st.session_state["selected_symbol"] = watchlist.iloc[0]["symbol"]
 
-mode = st.sidebar.radio(
+mode_options = ["ランキング", "個別銘柄", "用語説明"]
+mode_index = mode_options.index(st.session_state["mode"]) if st.session_state["mode"] in mode_options else 0
+
+st.sidebar.header("表示メニュー")
+selected_mode = st.sidebar.radio(
     "表示モード",
-    ["ランキング", "個別銘柄", "用語説明"],
-    index=0
+    mode_options,
+    index=mode_index
 )
+
+if selected_mode != st.session_state["mode"]:
+    st.session_state["mode"] = selected_mode
+    st.rerun()
 
 available_themes = ["すべて"] + sorted(watchlist["theme"].dropna().unique().tolist())
 selected_theme = st.sidebar.selectbox("テーマ絞り込み", available_themes)
-
 show_under_10000_only = st.sidebar.checkbox("日本株は1株1万円以内だけ表示", value=False)
 
 st.sidebar.divider()
 st.sidebar.caption("日本株は 7203.T のように .T を付けます。")
-
-
-if mode == "用語説明":
-    show_beginner_guide()
-    st.stop()
-
 
 filtered_watchlist = watchlist.copy()
 
@@ -529,17 +628,27 @@ if filtered_watchlist.empty:
     st.stop()
 
 
-if mode == "ランキング":
+if st.session_state["mode"] == "用語説明":
+    show_beginner_guide()
+    st.stop()
+
+
+if st.session_state["mode"] == "ランキング":
     st.header("買い候補ランキング")
     st.caption("watchlist.csv の銘柄を一括分析し、簡易スコア順に表示します。")
 
+    period, ma_short, ma_mid, ma_long = render_common_controls()
+
+    if not validate_ma_values(ma_short, ma_mid, ma_long):
+        st.stop()
+
     with st.expander("スコアの考え方を表示"):
-        st.markdown("""
+        st.markdown(f"""
 スコアは以下の条件をもとに作っています。
 
-- 終値が25日移動平均線より上
-- 5日移動平均線が25日移動平均線より上
-- 25日移動平均線が75日移動平均線より上
+- 終値が{ma_mid}日移動平均線より上
+- {ma_short}日移動平均線が{ma_mid}日移動平均線より上
+- {ma_mid}日移動平均線が{ma_long}日移動平均線より上
 - RSIが40〜65
 - MACDがSignalより上
 - MACDが直近で陽転
@@ -556,10 +665,10 @@ if mode == "ランキング":
     results = []
     progress = st.progress(0)
 
-    for i, row in filtered_watchlist.iterrows():
-        result = analyze_symbol(row["symbol"], row["name"], row["theme"], period)
+    for _, row in filtered_watchlist.iterrows():
+        result = analyze_symbol(row["symbol"], row["name"], row["theme"], period, ma_short, ma_mid, ma_long)
         results.append(result)
-        progress.progress((len(results)) / len(filtered_watchlist))
+        progress.progress(len(results) / len(filtered_watchlist))
 
     progress.empty()
 
@@ -582,7 +691,7 @@ if mode == "ランキング":
         axis=1
     )
     display_df["概算単元金額"] = display_df.apply(
-        lambda row: "-" if pd.isna(row["unit_price"]) or not row["symbol"].endswith(".T") else f"{row['unit_price'] * 100:,.0f}円",
+        lambda row: format_unit_amount(row["unit_price"], row["symbol"]),
         axis=1
     )
     display_df["rsi"] = display_df["rsi"].map(lambda x: None if pd.isna(x) else round(x, 1))
@@ -631,6 +740,29 @@ if mode == "ランキング":
         }
     )
 
+    st.subheader("銘柄トレンドへ移動")
+
+    st.caption("ボタンを押すと、個別銘柄画面へ移動してチャートを確認できます。")
+
+    for _, row in display_df.iterrows():
+        with st.container(border=True):
+            c1, c2, c3, c4 = st.columns([2.4, 1.1, 1.2, 1.2])
+
+            with c1:
+                st.markdown(f"**{row['symbol']} {row['name']}**")
+                st.caption(f"{row['theme']} / {row['status']}")
+
+            with c2:
+                st.metric("Score", f"{row['score']} / 12")
+
+            with c3:
+                st.metric("株価単価", row["株価単価"])
+
+            with c4:
+                if st.button("個別チャートを見る", key=f"detail_{row['symbol']}"):
+                    set_mode("個別銘柄", row["symbol"])
+                    st.rerun()
+
     st.subheader("上位銘柄の理由")
 
     top_df = display_df.head(5)
@@ -644,16 +776,32 @@ if mode == "ランキング":
     st.stop()
 
 
-if mode == "個別銘柄":
+if st.session_state["mode"] == "個別銘柄":
     st.header("個別銘柄分析")
+
+    period, ma_short, ma_mid, ma_long = render_common_controls()
+
+    if not validate_ma_values(ma_short, ma_mid, ma_long):
+        st.stop()
 
     options = [
         f"{row['symbol']} | {row['name']} | {row['theme']}"
         for _, row in filtered_watchlist.iterrows()
     ]
 
-    selected = st.sidebar.selectbox("銘柄を選択", options)
+    selected_symbol = st.session_state.get("selected_symbol", filtered_watchlist.iloc[0]["symbol"])
+
+    option_symbols = [option.split("|")[0].strip() for option in options]
+    selected_index = option_symbols.index(selected_symbol) if selected_symbol in option_symbols else 0
+
+    selected = st.selectbox(
+        "銘柄を選択",
+        options,
+        index=selected_index
+    )
+
     symbol = selected.split("|")[0].strip()
+    st.session_state["selected_symbol"] = symbol
 
     selected_row = filtered_watchlist[filtered_watchlist["symbol"] == symbol].iloc[0]
     name = selected_row["name"]
@@ -666,54 +814,89 @@ if mode == "個別銘柄":
         st.error("データを取得できませんでした。銘柄コードを確認してください。")
         st.stop()
 
-    df = add_indicators(df)
-    score_result = calculate_buy_score(df)
+    df = add_indicators(df, ma_short, ma_mid, ma_long)
+    score_result = calculate_buy_score(df, ma_short, ma_mid, ma_long)
 
-    clean = df.dropna()
+    labels = get_ma_labels(ma_short, ma_mid, ma_long)
+    required = [labels["short"], labels["mid"], labels["long"], "RSI", "MACD_DIFF", "Volume_Ratio", "Return_5d", "Return_20d"]
+    clean = df.dropna(subset=required)
+
+    if clean.empty:
+        st.error("指標計算に必要なデータが不足しています。期間を長くするか、移動平均の日数を短くしてください。")
+        st.stop()
+
     latest = clean.iloc[-1]
     unit_price = latest["Close"]
 
     st.subheader(f"{symbol} {name}")
-
     st.caption(f"テーマ：{theme}")
     if memo:
         st.caption(memo)
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("株価単価", format_price(unit_price, symbol))
-    col2.metric("買い候補スコア", f"{score_result['score']} / 12")
-    col3.metric("RSI", f"{latest['RSI']:.1f}")
-    col4.metric("出来高倍率", f"{latest['Volume_Ratio']:.2f}倍")
+    metric_cols = st.columns(6)
+    metric_cols[0].metric("株価単価", format_price(unit_price, symbol))
+    metric_cols[1].metric("スコア", f"{score_result['score']} / 12")
+    metric_cols[2].metric("RSI", f"{latest['RSI']:.1f}")
+    metric_cols[3].metric("出来高倍率", f"{latest['Volume_Ratio']:.2f}倍")
+    metric_cols[4].metric("5日騰落率", f"{latest['Return_5d']:.2f}%")
+    metric_cols[5].metric("20日騰落率", f"{latest['Return_20d']:.2f}%")
 
     if yen_symbol(symbol):
-        col5, col6 = st.columns(2)
-        col5.metric("概算単元金額", f"{unit_price * 100:,.0f}円")
-        col6.metric("価格帯", price_band_label(unit_price, symbol))
+        sub_cols = st.columns(4)
+        sub_cols[0].metric("概算単元金額", f"{unit_price * 100:,.0f}円")
+        sub_cols[1].metric("価格帯", price_band_label(unit_price, symbol))
+        sub_cols[2].metric(f"{ma_short}日MA", format_price(latest[labels["short"]], symbol))
+        sub_cols[3].metric(f"{ma_mid}日MA", format_price(latest[labels["mid"]], symbol))
+    else:
+        sub_cols = st.columns(3)
+        sub_cols[0].metric("価格帯", price_band_label(unit_price, symbol))
+        sub_cols[1].metric(f"{ma_short}日MA", format_price(latest[labels["short"]], symbol))
+        sub_cols[2].metric(f"{ma_mid}日MA", format_price(latest[labels["mid"]], symbol))
 
     st.info(f"判定：{score_result['status']}")
 
-    with st.expander("この銘柄の判定理由"):
+    with st.expander("この銘柄の判定理由", expanded=True):
         for reason in score_result["reasons"]:
             st.write(f"- {reason}")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
-        ["株価", "出来高", "RSI", "MACD", "用語・見方"]
-    )
+    st.subheader("株価トレンド")
+    draw_price_chart(df, ma_short, ma_mid, ma_long)
 
-    with tab1:
-        draw_price_chart(df)
+    st.subheader("補助指標")
+    c1, c2, c3 = st.columns(3)
 
-    with tab2:
+    with c1:
+        st.caption("出来高")
         draw_volume_chart(df)
 
-    with tab3:
+    with c2:
+        st.caption("RSI")
         draw_rsi_chart(df)
 
-    with tab4:
+    with c3:
+        st.caption("MACD")
         draw_macd_chart(df)
 
-    with tab5:
-        show_beginner_guide()
+    with st.expander("取得データを表示", expanded=False):
+        compact_df = df.tail(80).copy()
+        compact_df = compact_df[
+            [
+                "Open",
+                "High",
+                "Low",
+                "Close",
+                "Volume",
+                labels["short"],
+                labels["mid"],
+                labels["long"],
+                "RSI",
+                "MACD_DIFF",
+                "Volume_Ratio",
+                "Return_5d",
+                "Return_20d"
+            ]
+        ]
+        st.dataframe(compact_df, use_container_width=True)
 
-    with st.expander("取得データを表示"):
-        st.dataframe(df.tail(100), use_container_width=True)
+    with st.expander("用語・見方を表示", expanded=False):
+        show_beginner_guide()
