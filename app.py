@@ -417,22 +417,91 @@ def show_fund_catalog(funds: pd.DataFrame) -> None:
     )
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=1800)
 def load_price_data(ticker: str, period_value: str) -> pd.DataFrame:
-    df = yf.download(
-        ticker,
-        period=period_value,
-        auto_adjust=False,
-        progress=False,
-    )
+    """
+    yfinanceから価格データを取得する。
 
-    if df.empty:
+    Streamlit Cloud上では、ETF/指数系ティッカーで yf.download が空を返すことがあるため、
+    Ticker.history もフォールバックとして試す。
+    """
+    ticker = str(ticker or "").replace("　", " ").strip().upper()
+    if not ticker:
+        return pd.DataFrame()
+
+    def normalize_price_df(raw: pd.DataFrame) -> pd.DataFrame:
+        if raw is None or raw.empty:
+            return pd.DataFrame()
+
+        df = raw.copy()
+
+        # yfinanceのバージョンや取得方法により MultiIndex の向きが変わるため吸収する。
+        if isinstance(df.columns, pd.MultiIndex):
+            level_values = [list(map(str, df.columns.get_level_values(i))) for i in range(df.columns.nlevels)]
+            price_cols = {"Open", "High", "Low", "Close", "Adj Close", "Volume"}
+            if any(col in price_cols for col in level_values[0]):
+                df.columns = df.columns.get_level_values(0)
+            elif any(col in price_cols for col in level_values[-1]):
+                df.columns = df.columns.get_level_values(-1)
+            else:
+                df.columns = df.columns.get_level_values(0)
+
+        df.columns = [str(col).strip() for col in df.columns]
+
+        if "Close" not in df.columns and "Adj Close" in df.columns:
+            df["Close"] = df["Adj Close"]
+
+        if "Close" not in df.columns:
+            return pd.DataFrame()
+
+        # 指数・一部ETFでOHLC/Volumeが欠けるケースを補完する。
+        for col in ["Open", "High", "Low"]:
+            if col not in df.columns:
+                df[col] = df["Close"]
+        if "Volume" not in df.columns:
+            df["Volume"] = 0
+
+        required_cols = ["Open", "High", "Low", "Close", "Volume"]
+        df = df[required_cols].copy()
+        for col in required_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df = df.dropna(subset=["Close"])
+        df = df[~df.index.duplicated(keep="last")].sort_index()
         return df
 
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
+    attempts: list[pd.DataFrame] = []
 
-    return df
+    try:
+        attempts.append(
+            yf.download(
+                ticker,
+                period=period_value,
+                auto_adjust=False,
+                progress=False,
+                threads=False,
+                timeout=20,
+            )
+        )
+    except Exception:
+        pass
+
+    try:
+        attempts.append(yf.Ticker(ticker).history(period=period_value, auto_adjust=False, timeout=20))
+    except Exception:
+        pass
+
+    try:
+        attempts.append(yf.Ticker(ticker).history(period=period_value, auto_adjust=True, timeout=20))
+    except Exception:
+        pass
+
+    for raw in attempts:
+        df = normalize_price_df(raw)
+        if not df.empty:
+            return df
+
+    return pd.DataFrame()
 
 
 def yen_symbol(symbol: str) -> bool:
@@ -518,6 +587,7 @@ def add_indicators(
 
     df["Volume_MA20"] = df["Volume"].rolling(20).mean()
     df["Volume_Ratio"] = df["Volume"] / df["Volume_MA20"]
+    df["Volume_Ratio"] = df["Volume_Ratio"].replace([float("inf"), float("-inf")], pd.NA).fillna(1.0)
 
     df["Return_5d"] = df["Close"].pct_change(5) * 100
     df["Return_20d"] = df["Close"].pct_change(20) * 100
