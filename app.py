@@ -301,6 +301,99 @@ def load_watchlist_from_bytes(file_bytes: bytes) -> pd.DataFrame:
     return normalize_watchlist(df)
 
 
+def is_fund_catalog(df: pd.DataFrame) -> bool:
+    """投資信託カタログCSVかどうかを判定する。"""
+    return "asset_class" in df.columns or df["symbol"].astype(str).str.startswith("SMBCG").all()
+
+
+def show_fund_catalog(funds: pd.DataFrame) -> None:
+    """yfinanceで価格取得できない投資信託CSVを、比較用カタログとして表示する。"""
+    st.header("三井住友銀行 NISA成長投資枠ファンド一覧")
+    st.caption(
+        "このCSVは投資信託の比較・絞り込み用です。投資信託は通常の株式ティッカーではないため、"
+        "この画面では株価テクニカル分析・買い候補スコアは実行しません。"
+    )
+
+    df = funds.copy()
+
+    for col in ["asset_class", "fund_type", "manager", "availability", "hedge", "settlement", "source_date"]:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].fillna("").astype(str)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("表示ファンド数", len(df))
+    c2.metric("投資対象分類", df["asset_class"].replace("", pd.NA).dropna().nunique())
+    c3.metric("運用会社数", df["manager"].replace("", pd.NA).dropna().nunique())
+    c4.metric("対象予定を含む件数", int((df["availability"] != "取扱中").sum()))
+
+    with st.expander("ファンド用フィルター", expanded=True):
+        f1, f2, f3, f4 = st.columns(4)
+        with f1:
+            asset = st.selectbox("投資対象", ["すべて"] + sorted(df["asset_class"].replace("", pd.NA).dropna().unique().tolist()))
+        with f2:
+            manager = st.selectbox("運用会社", ["すべて"] + sorted(df["manager"].replace("", pd.NA).dropna().unique().tolist()))
+        with f3:
+            hedge = st.selectbox("為替ヘッジ", ["すべて"] + sorted(df["hedge"].replace("", pd.NA).dropna().unique().tolist()))
+        with f4:
+            availability = st.selectbox("取扱状況", ["すべて"] + sorted(df["availability"].replace("", pd.NA).dropna().unique().tolist()))
+        keyword = st.text_input("ファンド名キーワード", placeholder="例：米国、AI、ゴールド、インド")
+
+    view = df.copy()
+    if asset != "すべて":
+        view = view[view["asset_class"] == asset]
+    if manager != "すべて":
+        view = view[view["manager"] == manager]
+    if hedge != "すべて":
+        view = view[view["hedge"] == hedge]
+    if availability != "すべて":
+        view = view[view["availability"] == availability]
+    if keyword.strip():
+        key = keyword.strip()
+        view = view[view["name"].str.contains(key, case=False, na=False)]
+
+    st.subheader("ファンド一覧")
+    display_cols = [
+        col for col in [
+            "symbol", "name", "asset_class", "fund_type", "manager", "hedge",
+            "settlement", "availability", "memo", "source_date"
+        ] if col in view.columns
+    ]
+    st.dataframe(
+        view[display_cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "symbol": "管理ID",
+            "name": "ファンド名",
+            "asset_class": "投資対象",
+            "fund_type": "分類",
+            "manager": "運用会社",
+            "hedge": "為替ヘッジ",
+            "settlement": "決算頻度メモ",
+            "availability": "取扱状況",
+            "memo": "メモ",
+            "source_date": "資料基準日",
+        },
+    )
+
+    st.subheader("分類別件数")
+    left, right = st.columns(2)
+    with left:
+        by_asset = view["asset_class"].value_counts().reset_index()
+        by_asset.columns = ["投資対象", "件数"]
+        st.dataframe(by_asset, use_container_width=True, hide_index=True)
+    with right:
+        by_manager = view["manager"].value_counts().reset_index()
+        by_manager.columns = ["運用会社", "件数"]
+        st.dataframe(by_manager, use_container_width=True, hide_index=True)
+
+    st.info(
+        "この一覧は三井住友銀行のNISA成長投資枠対象ファンドをCSV化したものです。"
+        "実際の購入前には、三井住友銀行の最新一覧、目論見書、購入時手数料、信託報酬、信託財産留保額を確認してください。"
+    )
+
+
 @st.cache_data(ttl=3600)
 def load_price_data(ticker: str, period_value: str) -> pd.DataFrame:
     df = yf.download(
@@ -773,8 +866,10 @@ else:
 
 st.sidebar.caption(f"読込中：{active_watchlist_label} / {len(watchlist)}銘柄")
 
+is_fund_file = is_fund_catalog(watchlist)
+
 if "mode" not in st.session_state:
-    st.session_state["mode"] = "ランキング"
+    st.session_state["mode"] = "ファンド一覧" if is_fund_file else "ランキング"
 
 if "selected_symbol" not in st.session_state:
     st.session_state["selected_symbol"] = watchlist.iloc[0]["symbol"]
@@ -789,8 +884,10 @@ if "ma_mid" not in st.session_state:
 if "ma_long" not in st.session_state:
     st.session_state["ma_long"] = 75
 
-mode_options = ["ランキング", "スコア履歴", "個別銘柄", "用語説明"]
-mode_index = mode_options.index(st.session_state["mode"]) if st.session_state["mode"] in mode_options else 0
+mode_options = ["ファンド一覧", "用語説明"] if is_fund_file else ["ランキング", "スコア履歴", "個別銘柄", "用語説明"]
+if st.session_state["mode"] not in mode_options:
+    st.session_state["mode"] = mode_options[0]
+mode_index = mode_options.index(st.session_state["mode"])
 
 selected_mode = st.sidebar.radio("表示モード", mode_options, index=mode_index)
 
@@ -800,16 +897,22 @@ if selected_mode != st.session_state["mode"]:
 
 available_themes = ["すべて"] + sorted(watchlist["theme"].dropna().unique().tolist())
 selected_theme = st.sidebar.selectbox("テーマ絞り込み", available_themes)
-show_under_10000_only = st.sidebar.checkbox("日本株は1株1万円以内だけ表示", value=False)
-analysis_limit_label = st.sidebar.selectbox(
-    "ランキング分析対象",
-    ["先頭100件", "先頭300件", "すべて"],
-    index=0,
-    help="銘柄数が多いCSVでは、全件を毎回分析すると取得に時間がかかります。",
-)
 
-st.sidebar.divider()
-st.sidebar.caption("日本株は 7203.T のように .T を付けます。")
+if is_fund_file:
+    show_under_10000_only = False
+    analysis_limit_label = "すべて"
+    st.sidebar.divider()
+    st.sidebar.caption("投資信託CSVは比較カタログとして表示します。株価スコア分析は行いません。")
+else:
+    show_under_10000_only = st.sidebar.checkbox("日本株は1株1万円以内だけ表示", value=False)
+    analysis_limit_label = st.sidebar.selectbox(
+        "ランキング分析対象",
+        ["先頭100件", "先頭300件", "すべて"],
+        index=0,
+        help="銘柄数が多いCSVでは、全件を毎回分析すると取得に時間がかかります。",
+    )
+    st.sidebar.divider()
+    st.sidebar.caption("日本株は 7203.T のように .T を付けます。")
 
 filtered_watchlist = watchlist.copy()
 if selected_theme != "すべて":
@@ -825,6 +928,11 @@ with st.sidebar.expander("CSV銘柄一覧", expanded=False):
         use_container_width=True,
         hide_index=True,
     )
+
+
+if is_fund_file and st.session_state["mode"] == "ファンド一覧":
+    show_fund_catalog(filtered_watchlist)
+    st.stop()
 
 
 if st.session_state["mode"] == "用語説明":
