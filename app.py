@@ -262,7 +262,26 @@ def normalize_watchlist(df: pd.DataFrame) -> pd.DataFrame:
     if "memo" not in df.columns:
         df["memo"] = ""
 
-    for col in ["symbol", "name", "theme", "memo"]:
+    optional_text_cols = [
+        "analysis_symbol",
+        "analysis_name",
+        "analysis_note",
+        "asset_class",
+        "fund_type",
+        "manager",
+        "sales_channel",
+        "nisa_growth",
+        "availability",
+        "hedge",
+        "settlement",
+        "source_date",
+        "source_url",
+    ]
+    for col in optional_text_cols:
+        if col not in df.columns:
+            df[col] = ""
+
+    for col in ["symbol", "name", "theme", "memo"] + optional_text_cols:
         df[col] = df[col].fillna("").astype(str).str.strip()
 
     df = df[df["symbol"] != ""]
@@ -310,8 +329,8 @@ def show_fund_catalog(funds: pd.DataFrame) -> None:
     """yfinanceで価格取得できない投資信託CSVを、比較用カタログとして表示する。"""
     st.header("三井住友銀行 NISA成長投資枠ファンド一覧")
     st.caption(
-        "このCSVは投資信託の比較・絞り込み用です。投資信託は通常の株式ティッカーではないため、"
-        "この画面では株価テクニカル分析・買い候補スコアは実行しません。"
+        "このCSVは投資信託の比較・絞り込み用です。ランキングや個別トレンドでは、"
+        "各ファンドに設定した分析用プロキシETF/指数ティッカーを使ってテクニカル分析します。"
     )
 
     df = funds.copy()
@@ -356,7 +375,7 @@ def show_fund_catalog(funds: pd.DataFrame) -> None:
     display_cols = [
         col for col in [
             "symbol", "name", "asset_class", "fund_type", "manager", "hedge",
-            "settlement", "availability", "memo", "source_date"
+            "settlement", "availability", "analysis_symbol", "analysis_name", "analysis_note", "memo", "source_date"
         ] if col in view.columns
     ]
     st.dataframe(
@@ -373,6 +392,9 @@ def show_fund_catalog(funds: pd.DataFrame) -> None:
             "settlement": "決算頻度メモ",
             "availability": "取扱状況",
             "memo": "メモ",
+            "analysis_symbol": "分析用ティッカー",
+            "analysis_name": "分析用プロキシ",
+            "analysis_note": "分析上の注意",
             "source_date": "資料基準日",
         },
     )
@@ -390,6 +412,7 @@ def show_fund_catalog(funds: pd.DataFrame) -> None:
 
     st.info(
         "この一覧は三井住友銀行のNISA成長投資枠対象ファンドをCSV化したものです。"
+        "ランキング・トレンドはファンドそのものの基準価額ではなく、分析用プロキシの価格データで計算します。"
         "実際の購入前には、三井住友銀行の最新一覧、目論見書、購入時手数料、信託報酬、信託財産留保額を確認してください。"
     )
 
@@ -442,6 +465,20 @@ def price_band_label(value, symbol: str) -> str:
     if value <= 10000:
         return "1万円以内"
     return "1万円超"
+
+
+def analysis_symbol_for_row(row: pd.Series) -> str:
+    value = str(row.get("analysis_symbol", "")).strip()
+    return value if value else str(row.get("symbol", "")).strip()
+
+
+def analysis_name_for_row(row: pd.Series) -> str:
+    value = str(row.get("analysis_name", "")).strip()
+    return value if value else str(row.get("name", "")).strip()
+
+
+def is_proxy_analysis(symbol: str, data_symbol: str) -> bool:
+    return str(symbol).strip() != str(data_symbol).strip()
 
 
 def ma_labels(ma_short: int, ma_mid: int, ma_long: int) -> dict[str, str]:
@@ -607,14 +644,21 @@ def analyze_symbol(
     ma_short: int,
     ma_mid: int,
     ma_long: int,
+    data_symbol: str | None = None,
+    analysis_name: str = "",
+    analysis_note: str = "",
 ) -> dict:
-    df = load_price_data(symbol, period)
+    data_symbol = str(data_symbol or symbol).strip()
+    df = load_price_data(data_symbol, period)
 
     if df.empty:
         return {
             "symbol": symbol,
             "name": name,
             "theme": theme,
+            "analysis_symbol": data_symbol,
+            "analysis_name": analysis_name,
+            "analysis_note": analysis_note,
             "score": 0,
             "status": "取得失敗",
             "unit_price": None,
@@ -636,6 +680,9 @@ def analyze_symbol(
             "symbol": symbol,
             "name": name,
             "theme": theme,
+            "analysis_symbol": data_symbol,
+            "analysis_name": analysis_name,
+            "analysis_note": analysis_note,
             "score": result["score"],
             "status": result["status"],
             "unit_price": None,
@@ -654,10 +701,13 @@ def analyze_symbol(
         "symbol": symbol,
         "name": name,
         "theme": theme,
+        "analysis_symbol": data_symbol,
+        "analysis_name": analysis_name,
+        "analysis_note": analysis_note,
         "score": result["score"],
         "status": result["status"],
         "unit_price": close,
-        "price_band": price_band_label(close, symbol),
+        "price_band": "プロキシ" if is_proxy_analysis(symbol, data_symbol) else price_band_label(close, symbol),
         "rsi": latest["RSI"],
         "volume_ratio": latest["Volume_Ratio"],
         "macd_diff": latest["MACD_DIFF"],
@@ -884,7 +934,7 @@ if "ma_mid" not in st.session_state:
 if "ma_long" not in st.session_state:
     st.session_state["ma_long"] = 75
 
-mode_options = ["ファンド一覧", "用語説明"] if is_fund_file else ["ランキング", "スコア履歴", "個別銘柄", "用語説明"]
+mode_options = ["ランキング", "スコア履歴", "個別銘柄", "ファンド一覧", "用語説明"] if is_fund_file else ["ランキング", "スコア履歴", "個別銘柄", "用語説明"]
 if st.session_state["mode"] not in mode_options:
     st.session_state["mode"] = mode_options[0]
 mode_index = mode_options.index(st.session_state["mode"])
@@ -900,9 +950,14 @@ selected_theme = st.sidebar.selectbox("テーマ絞り込み", available_themes)
 
 if is_fund_file:
     show_under_10000_only = False
-    analysis_limit_label = "すべて"
+    analysis_limit_label = st.sidebar.selectbox(
+        "ランキング分析対象",
+        ["先頭100件", "先頭300件", "すべて"],
+        index=2,
+        help="投資信託CSVでは、analysis_symbol列のプロキシを使って分析します。",
+    )
     st.sidebar.divider()
-    st.sidebar.caption("投資信託CSVは比較カタログとして表示します。株価スコア分析は行いません。")
+    st.sidebar.caption("投資信託CSVは analysis_symbol のプロキシETF/指数でスコア分析します。")
 else:
     show_under_10000_only = st.sidebar.checkbox("日本株は1株1万円以内だけ表示", value=False)
     analysis_limit_label = st.sidebar.selectbox(
@@ -947,7 +1002,10 @@ if st.session_state["mode"] == "スコア履歴":
 
 if st.session_state["mode"] == "ランキング":
     st.header("買い候補ランキング")
-    st.caption("ランキングは標準設定の 1年 / MA5・MA25・MA75 で判定します。")
+    if is_fund_file:
+        st.caption("ランキングは標準設定の 1年 / MA5・MA25・MA75 で判定します。投資信託CSVでは、各ファンドの analysis_symbol プロキシで計算します。")
+    else:
+        st.caption("ランキングは標準設定の 1年 / MA5・MA25・MA75 で判定します。")
 
     period = "1y"
     ma_short = 5
@@ -993,7 +1051,19 @@ if st.session_state["mode"] == "ランキング":
     progress = st.progress(0)
 
     for _, row in analysis_watchlist.iterrows():
-        result = analyze_symbol(row["symbol"], row["name"], row["theme"], period, ma_short, ma_mid, ma_long)
+        data_symbol = analysis_symbol_for_row(row)
+        result = analyze_symbol(
+            row["symbol"],
+            row["name"],
+            row["theme"],
+            period,
+            ma_short,
+            ma_mid,
+            ma_long,
+            data_symbol=data_symbol,
+            analysis_name=analysis_name_for_row(row),
+            analysis_note=str(row.get("analysis_note", "")).strip(),
+        )
         results.append(result)
         progress.progress(len(results) / len(analysis_watchlist))
 
@@ -1010,9 +1080,11 @@ if st.session_state["mode"] == "ランキング":
     display_df = ranking_df.copy()
     display_df = display_df.sort_values(by=["score", "volume_ratio"], ascending=[False, False])
 
-    display_df["株価単価"] = display_df.apply(lambda row: format_price(row["unit_price"], row["symbol"]), axis=1)
-    display_df["概算単元金額"] = display_df.apply(
-        lambda row: format_unit_amount(row["unit_price"], row["symbol"]),
+    price_label = "プロキシ価格" if is_fund_file else "株価単価"
+    unit_label = "概算単元金額"
+    display_df[price_label] = display_df.apply(lambda row: format_price(row["unit_price"], row["analysis_symbol"]), axis=1)
+    display_df[unit_label] = display_df.apply(
+        lambda row: format_unit_amount(row["unit_price"], row["analysis_symbol"]),
         axis=1,
     )
     display_df["rsi"] = display_df["rsi"].map(lambda x: None if pd.isna(x) else round(x, 1))
@@ -1032,11 +1104,12 @@ if st.session_state["mode"] == "ランキング":
                 "symbol",
                 "name",
                 "theme",
+                *(["analysis_symbol", "analysis_name"] if is_fund_file else []),
                 "score",
                 "status",
-                "株価単価",
+                price_label,
                 "price_band",
-                "概算単元金額",
+                unit_label,
                 "rsi",
                 "volume_ratio",
                 "macd_diff",
@@ -1047,11 +1120,15 @@ if st.session_state["mode"] == "ランキング":
         use_container_width=True,
         hide_index=True,
         column_config={
-            "symbol": "銘柄コード",
-            "name": "銘柄名",
+            "symbol": "管理ID" if is_fund_file else "銘柄コード",
+            "name": "ファンド名" if is_fund_file else "銘柄名",
             "theme": "テーマ",
+            "analysis_symbol": "分析用ティッカー",
+            "analysis_name": "分析用プロキシ",
             "score": "スコア",
             "status": "判定",
+            price_label: price_label,
+            unit_label: unit_label,
             "price_band": "価格帯",
             "rsi": "RSI",
             "volume_ratio": "出来高倍率",
@@ -1098,16 +1175,22 @@ if st.session_state["mode"] == "個別銘柄":
     name = selected_row["name"]
     theme = selected_row["theme"]
     memo = selected_row.get("memo", "")
+    data_symbol = analysis_symbol_for_row(selected_row)
+    analysis_name = analysis_name_for_row(selected_row)
+    analysis_note = str(selected_row.get("analysis_note", "")).strip()
 
     period = st.session_state["detail_period"]
     ma_short = int(st.session_state["ma_short"])
     ma_mid = int(st.session_state["ma_mid"])
     ma_long = int(st.session_state["ma_long"])
 
-    df = load_price_data(symbol, period)
+    df = load_price_data(data_symbol, period)
 
     if df.empty:
-        st.error("データを取得できませんでした。銘柄コードを確認してください。")
+        if is_proxy_analysis(symbol, data_symbol):
+            st.error(f"分析用プロキシ {data_symbol} のデータを取得できませんでした。CSVの analysis_symbol を確認してください。")
+        else:
+            st.error("データを取得できませんでした。銘柄コードを確認してください。")
         st.stop()
 
     df = add_indicators(df, ma_short, ma_mid, ma_long)
@@ -1134,10 +1217,14 @@ if st.session_state["mode"] == "個別銘柄":
 
     st.subheader(f"{symbol} {name}")
     st.caption(f"テーマ：{theme}")
+    if is_proxy_analysis(symbol, data_symbol):
+        st.caption(f"分析用プロキシ：{data_symbol} / {analysis_name}")
+        if analysis_note:
+            st.caption(f"分析メモ：{analysis_note}")
     if memo:
         st.caption(memo)
 
-    st.subheader("株価トレンド")
+    st.subheader("価格トレンド" if is_proxy_analysis(symbol, data_symbol) else "株価トレンド")
     draw_price_chart(df, ma_short, ma_mid, ma_long)
 
     st.markdown("#### 表示設定")
