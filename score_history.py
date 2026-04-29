@@ -25,10 +25,11 @@ def normalize_watchlist(df: pd.DataFrame) -> pd.DataFrame:
         df["theme"] = "未分類"
     if "memo" not in df.columns:
         df["memo"] = ""
-    for col in ["analysis_symbol", "analysis_name", "analysis_note"]:
+    optional_cols = ["analysis_symbol", "analysis_name", "analysis_note", "asset_class", "fund_type"]
+    for col in optional_cols:
         if col not in df.columns:
             df[col] = ""
-    for col in ["symbol", "name", "theme", "memo", "analysis_symbol", "analysis_name", "analysis_note"]:
+    for col in ["symbol", "name", "theme", "memo"] + optional_cols:
         df[col] = df[col].fillna("").astype(str).str.strip()
     df = df[df["symbol"] != ""].drop_duplicates(subset=["symbol"], keep="first")
     return df.reset_index(drop=True)
@@ -175,9 +176,81 @@ def price_band_label(value, symbol: str) -> str:
     return "1万円超"
 
 
+def split_symbol_candidates(value: str) -> list[str]:
+    text = str(value or "").replace("　", " ").strip()
+    if not text:
+        return []
+    for sep in ["、", ",", "/", "|", ";"]:
+        text = text.replace(sep, " ")
+    candidates = []
+    for item in text.split():
+        item = item.strip().upper()
+        if item and item not in candidates:
+            candidates.append(item)
+    return candidates
+
+
+def inferred_proxy_symbols_for_row(row: pd.Series) -> list[str]:
+    symbol = str(row.get("symbol", "")).strip().upper()
+    text = " ".join(str(row.get(col, "")) for col in ["name", "theme", "asset_class", "fund_type", "memo", "analysis_name"])
+    if not symbol.startswith("SMBCG"):
+        return [symbol] if symbol else []
+    rules = [
+        (["日経", "225"], ["1321.T", "^N225", "EWJ"]),
+        (["TOPIX", "トピックス", "国内株式", "日本株"], ["1306.T", "^TOPX", "EWJ"]),
+        (["米国", "S&P", "Ｓ＆Ｐ", "NASDAQ", "ナスダック"], ["2558.T", "1655.T", "SPY", "VOO", "QQQ"]),
+        (["全世界", "世界株", "オール", "グローバル株式"], ["2559.T", "VT", "ACWI"]),
+        (["先進国"], ["2513.T", "VEA", "EFA"]),
+        (["新興国", "エマージング"], ["1658.T", "VWO", "EEM"]),
+        (["インド"], ["1678.T", "INDA", "EPI"]),
+        (["中国"], ["FXI", "MCHI", "ASHR"]),
+        (["ゴールド", "金", "黄金"], ["1540.T", "GLD", "IAU"]),
+        (["REIT", "リート", "不動産"], ["1343.T", "VNQ", "IYR"]),
+        (["債券", "ボンド"], ["2510.T", "AGG", "BND"]),
+        (["バランス", "資産分散"], ["ACWI", "AGG", "VT"]),
+    ]
+    lower_text = text.lower()
+    for keywords, proxies in rules:
+        if any(key.lower() in lower_text for key in keywords):
+            return proxies
+    return ["ACWI", "VT", "SPY"]
+
+
+def analysis_candidates_for_row(row: pd.Series) -> list[str]:
+    candidates = []
+    candidates.extend(split_symbol_candidates(str(row.get("analysis_symbol", ""))))
+    candidates.extend(inferred_proxy_symbols_for_row(row))
+    cleaned = []
+    for item in candidates:
+        item = str(item).strip().upper()
+        if item and not item.startswith("SMBCG") and item not in cleaned:
+            cleaned.append(item)
+    return cleaned or [str(row.get("symbol", "")).strip().upper()]
+
+
+def load_price_data_from_candidates(candidates, period_value: str) -> tuple[pd.DataFrame, str]:
+    if isinstance(candidates, str):
+        candidate_list = split_symbol_candidates(candidates) or [candidates]
+    else:
+        candidate_list = []
+        for candidate in candidates:
+            candidate_list.extend(split_symbol_candidates(str(candidate)))
+    cleaned = []
+    for candidate in candidate_list:
+        candidate = str(candidate).strip().upper()
+        if candidate and not candidate.startswith("SMBCG") and candidate not in cleaned:
+            cleaned.append(candidate)
+    for candidate in cleaned:
+        df = load_price_data(candidate, period_value)
+        if not df.empty:
+            return df, candidate
+    return pd.DataFrame(), cleaned[0] if cleaned else ""
+
+
 def analyze_row(row: pd.Series, list_name: str, run_date: str) -> dict:
     symbol = str(row["symbol"]).strip()
-    data_symbol = str(row.get("analysis_symbol", "")).strip() or symbol
+    data_candidates = analysis_candidates_for_row(row)
+    data_symbol = data_candidates[0] if data_candidates else symbol
     base = {
         "run_date": run_date,
         "list_name": list_name,
@@ -196,7 +269,10 @@ def analyze_row(row: pd.Series, list_name: str, run_date: str) -> dict:
         "return_5d": None,
         "return_20d": None,
     }
-    df = load_price_data(data_symbol, PERIOD)
+    df, used_data_symbol = load_price_data_from_candidates(data_candidates, PERIOD)
+    if used_data_symbol:
+        data_symbol = used_data_symbol
+        base["analysis_symbol"] = data_symbol
     if df.empty:
         return base
     df = add_indicators(df, MA_SHORT, MA_MID, MA_LONG)

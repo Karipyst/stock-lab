@@ -296,7 +296,7 @@ def normalize_watchlist(df: pd.DataFrame) -> pd.DataFrame:
 
 
 @st.cache_data(ttl=3600)
-def load_watchlist_from_path(path_text: str) -> pd.DataFrame:
+def load_watchlist_from_path(path_text: str, mtime: float = 0.0) -> pd.DataFrame:
     path = Path(path_text)
 
     if path.exists():
@@ -536,14 +536,95 @@ def price_band_label(value, symbol: str) -> str:
     return "1万円超"
 
 
+def split_symbol_candidates(value: str) -> list[str]:
+    text = str(value or "").replace("　", " ").strip()
+    if not text:
+        return []
+    for sep in ["、", ",", "/", "|", ";"]:
+        text = text.replace(sep, " ")
+    candidates = []
+    for item in text.split():
+        item = item.strip().upper()
+        if item and item not in candidates:
+            candidates.append(item)
+    return candidates
+
+
+def inferred_proxy_symbols_for_row(row: pd.Series) -> list[str]:
+    symbol = str(row.get("symbol", "")).strip().upper()
+    text = " ".join(
+        str(row.get(col, ""))
+        for col in ["name", "theme", "asset_class", "fund_type", "memo", "analysis_name"]
+    )
+
+    # SMBCGxxx の管理IDはyfinanceでは取得できないため、CSV側のanalysis_symbolが欠けても動くように推定する。
+    if not symbol.startswith("SMBCG"):
+        return [symbol] if symbol else []
+
+    rules = [
+        (["日経", "225"], ["1321.T", "^N225", "EWJ"]),
+        (["TOPIX", "トピックス", "国内株式", "日本株"], ["1306.T", "^TOPX", "EWJ"]),
+        (["米国", "S&P", "Ｓ＆Ｐ", "NASDAQ", "ナスダック"], ["2558.T", "1655.T", "SPY", "VOO", "QQQ"]),
+        (["全世界", "世界株", "オール", "グローバル株式"], ["2559.T", "VT", "ACWI"]),
+        (["先進国"], ["2513.T", "VEA", "EFA"]),
+        (["新興国", "エマージング"], ["1658.T", "VWO", "EEM"]),
+        (["インド"], ["1678.T", "INDA", "EPI"]),
+        (["中国"], ["FXI", "MCHI", "ASHR"]),
+        (["ゴールド", "金", "黄金"], ["1540.T", "GLD", "IAU"]),
+        (["REIT", "リート", "不動産"], ["1343.T", "VNQ", "IYR"]),
+        (["債券", "ボンド"], ["2510.T", "AGG", "BND"]),
+        (["バランス", "資産分散"], ["ACWI", "AGG", "VT"]),
+    ]
+    for keywords, proxies in rules:
+        if any(key.lower() in text.lower() for key in keywords):
+            return proxies
+    return ["ACWI", "VT", "SPY"]
+
+
+def analysis_candidates_for_row(row: pd.Series) -> list[str]:
+    candidates = []
+    candidates.extend(split_symbol_candidates(str(row.get("analysis_symbol", ""))))
+    candidates.extend(inferred_proxy_symbols_for_row(row))
+
+    # SMBCGxxx は管理IDであり価格取得対象ではない。候補から除外する。
+    cleaned = []
+    for item in candidates:
+        if not item or item.startswith("SMBCG"):
+            continue
+        if item not in cleaned:
+            cleaned.append(item)
+    return cleaned or [str(row.get("symbol", "")).strip().upper()]
+
+
 def analysis_symbol_for_row(row: pd.Series) -> str:
-    value = str(row.get("analysis_symbol", "")).strip()
-    return value if value else str(row.get("symbol", "")).strip()
+    candidates = analysis_candidates_for_row(row)
+    return candidates[0] if candidates else str(row.get("symbol", "")).strip()
 
 
 def analysis_name_for_row(row: pd.Series) -> str:
     value = str(row.get("analysis_name", "")).strip()
     return value if value else str(row.get("name", "")).strip()
+
+
+def load_price_data_from_candidates(candidates, period_value: str) -> tuple[pd.DataFrame, str]:
+    if isinstance(candidates, str):
+        candidate_list = split_symbol_candidates(candidates) or [candidates]
+    else:
+        candidate_list = []
+        for candidate in candidates:
+            candidate_list.extend(split_symbol_candidates(str(candidate)))
+
+    cleaned = []
+    for candidate in candidate_list:
+        candidate = str(candidate).strip().upper()
+        if candidate and candidate not in cleaned and not candidate.startswith("SMBCG"):
+            cleaned.append(candidate)
+
+    for candidate in cleaned:
+        df = load_price_data(candidate, period_value)
+        if not df.empty:
+            return df, candidate
+    return pd.DataFrame(), cleaned[0] if cleaned else ""
 
 
 def is_proxy_analysis(symbol: str, data_symbol: str) -> bool:
@@ -718,8 +799,9 @@ def analyze_symbol(
     analysis_name: str = "",
     analysis_note: str = "",
 ) -> dict:
-    data_symbol = str(data_symbol or symbol).strip()
-    df = load_price_data(data_symbol, period)
+    requested_data_symbol = data_symbol if data_symbol is not None else symbol
+    df, used_data_symbol = load_price_data_from_candidates(requested_data_symbol, period)
+    data_symbol = used_data_symbol or str(requested_data_symbol or symbol).strip()
 
     if df.empty:
         return {
@@ -957,6 +1039,7 @@ def set_mode(mode: str, symbol: str | None = None):
 
 
 st.sidebar.header("表示メニュー")
+st.sidebar.caption("app version: smbc-proxy-fallback-20260429")
 
 watchlist_files = find_watchlist_files()
 if watchlist_files:
@@ -981,8 +1064,10 @@ if uploaded_watchlist is not None:
     watchlist = load_watchlist_from_bytes(uploaded_watchlist.getvalue())
     active_watchlist_label = uploaded_watchlist.name
 else:
-    watchlist = load_watchlist_from_path(selected_watchlist_path)
-    active_watchlist_label = Path(selected_watchlist_path).name
+    selected_path_obj = Path(selected_watchlist_path)
+    selected_mtime = selected_path_obj.stat().st_mtime if selected_path_obj.exists() else 0.0
+    watchlist = load_watchlist_from_path(selected_watchlist_path, selected_mtime)
+    active_watchlist_label = selected_path_obj.name
 
 st.sidebar.caption(f"読込中：{active_watchlist_label} / {len(watchlist)}銘柄")
 
@@ -1121,7 +1206,7 @@ if st.session_state["mode"] == "ランキング":
     progress = st.progress(0)
 
     for _, row in analysis_watchlist.iterrows():
-        data_symbol = analysis_symbol_for_row(row)
+        data_symbol = analysis_candidates_for_row(row)
         result = analyze_symbol(
             row["symbol"],
             row["name"],
@@ -1245,7 +1330,8 @@ if st.session_state["mode"] == "個別銘柄":
     name = selected_row["name"]
     theme = selected_row["theme"]
     memo = selected_row.get("memo", "")
-    data_symbol = analysis_symbol_for_row(selected_row)
+    data_candidates = analysis_candidates_for_row(selected_row)
+    data_symbol = data_candidates[0] if data_candidates else analysis_symbol_for_row(selected_row)
     analysis_name = analysis_name_for_row(selected_row)
     analysis_note = str(selected_row.get("analysis_note", "")).strip()
 
@@ -1254,7 +1340,8 @@ if st.session_state["mode"] == "個別銘柄":
     ma_mid = int(st.session_state["ma_mid"])
     ma_long = int(st.session_state["ma_long"])
 
-    df = load_price_data(data_symbol, period)
+    df, used_data_symbol = load_price_data_from_candidates(data_candidates, period)
+    data_symbol = used_data_symbol or data_symbol
 
     if df.empty:
         if is_proxy_analysis(symbol, data_symbol):
