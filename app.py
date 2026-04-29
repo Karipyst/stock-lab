@@ -98,10 +98,85 @@ def show_score_history(watchlist: pd.DataFrame):
     symbol = selected.split("|")[0].strip()
     one = history[history["symbol"] == symbol].sort_values("run_date").copy()
 
+    st.subheader("スコア推移")
+    st.caption("選択銘柄に加えて、最新保存日時点で「強い買い候補」の銘柄を同じグラフに重ねて表示できます。")
+
+    latest_strong = latest[latest["status"] == "強い買い候補"].copy()
+    latest_strong = latest_strong.sort_values(["score", "volume_ratio"], ascending=[False, False], na_position="last")
+
+    strong_options = []
+    strong_label_to_symbol = {}
+    for _, row in latest_strong.iterrows():
+        label = f"{row['symbol']} | {row['name']} | Score {row['score']}"
+        strong_options.append(label)
+        strong_label_to_symbol[label] = row["symbol"]
+
+    default_strong_options = strong_options[: min(8, len(strong_options))]
+    selected_strong_labels = st.multiselect(
+        "同じグラフに重ねる強い買い候補",
+        strong_options,
+        default=default_strong_options,
+        help="最新保存日時点で status が『強い買い候補』の銘柄です。多すぎると見づらくなるため、初期表示は上位8件までにしています。",
+    )
+
+    overlay_symbols = [strong_label_to_symbol[label] for label in selected_strong_labels]
+    chart_symbols = []
+    if symbol not in chart_symbols:
+        chart_symbols.append(symbol)
+    for overlay_symbol in overlay_symbols:
+        if overlay_symbol not in chart_symbols:
+            chart_symbols.append(overlay_symbol)
+
+    latest_name_map = latest.drop_duplicates("symbol").set_index("symbol")["name"].to_dict()
+    latest_score_map = latest.drop_duplicates("symbol").set_index("symbol")["score"].to_dict()
+    latest_status_map = latest.drop_duplicates("symbol").set_index("symbol")["status"].to_dict()
+
     fig = go.Figure()
-    fig.add_trace(go.Scatter(x=one["run_date"], y=one["score"], name="スコア", mode="lines+markers"))
-    fig.update_layout(height=300, margin=dict(l=10, r=10, t=24, b=10), yaxis=dict(range=[0, 12]))
+    for chart_symbol in chart_symbols:
+        trend = history[history["symbol"] == chart_symbol].sort_values("run_date").copy()
+        if trend.empty:
+            continue
+        chart_name = latest_name_map.get(chart_symbol, chart_symbol)
+        latest_score = latest_score_map.get(chart_symbol)
+        latest_status = latest_status_map.get(chart_symbol, "")
+        trace_name = f"{chart_symbol} {chart_name}"
+        if pd.notna(latest_score):
+            trace_name += f" / 最新{latest_score:.0f}"
+        if latest_status:
+            trace_name += f" / {latest_status}"
+
+        fig.add_trace(
+            go.Scatter(
+                x=trend["run_date"],
+                y=trend["score"],
+                name=trace_name,
+                mode="lines+markers",
+                line=dict(width=4 if chart_symbol == symbol else 2),
+            )
+        )
+
+    fig.add_hrect(y0=9, y1=12, opacity=0.08, line_width=0, annotation_text="強い買い候補", annotation_position="top left")
+    fig.add_hrect(y0=6, y1=9, opacity=0.05, line_width=0, annotation_text="買い候補", annotation_position="bottom left")
+    fig.update_layout(
+        height=420,
+        margin=dict(l=10, r=10, t=24, b=10),
+        yaxis=dict(range=[0, 12], title="スコア"),
+        xaxis=dict(title="保存日"),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.35, xanchor="left", x=0),
+    )
     st.plotly_chart(fig, use_container_width=True)
+
+    if latest_strong.empty:
+        st.info("最新保存日時点で『強い買い候補』の銘柄はありません。")
+    else:
+        with st.expander("最新の強い買い候補一覧", expanded=False):
+            strong_cols = [
+                col for col in [
+                    "run_date", "symbol", "name", "theme", "score", "status", "unit_price",
+                    "rsi", "volume_ratio", "macd_diff", "return_5d", "return_20d",
+                ] if col in latest_strong.columns
+            ]
+            st.dataframe(latest_strong[strong_cols], use_container_width=True, hide_index=True)
 
     detail_cols = [
         col for col in [
