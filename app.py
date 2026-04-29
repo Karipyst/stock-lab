@@ -1,5 +1,6 @@
 from pathlib import Path
 import io
+import hmac
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -9,17 +10,67 @@ import yfinance as yf
 
 
 st.set_page_config(
-    page_title="Stock Dashboard",
+    page_title="Stock Analyzer",
     page_icon="📈",
     layout="wide",
 )
 
-st.title("株価分析ダッシュボード")
-st.caption("株価・出来高・テクニカル指標・買い候補スコアを確認するためのダッシュボードです。")
-
 WATCHLIST_PATH = Path("watchlist.csv")
 
 HISTORY_PATH = Path("score_history.csv")
+
+
+def get_app_password() -> str:
+    """Streamlit Secrets からアプリ用パスワードを取得する。"""
+    try:
+        password = st.secrets.get("APP_PASSWORD", "")
+    except Exception:
+        password = ""
+    return str(password) if password is not None else ""
+
+
+def require_password() -> None:
+    """認証が通るまで本体機能を表示しない。"""
+    if st.session_state.get("authenticated", False):
+        return
+
+    st.markdown(
+        """
+        <style>
+        [data-testid="stSidebar"] { display: none; }
+        [data-testid="collapsedControl"] { display: none; }
+        .block-container { max-width: 720px; padding-top: 7rem; }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.title("Stock Analyzer")
+    st.caption("株価分析ダッシュボードにアクセスするにはパスワードを入力してください。")
+
+    with st.form("login_form", clear_on_submit=False):
+        password = st.text_input("Password", type="password", placeholder="Password")
+        submitted = st.form_submit_button("Unlock")
+
+    if submitted:
+        expected_password = get_app_password()
+
+        if not expected_password:
+            st.error("Streamlit Secrets に APP_PASSWORD が設定されていません。")
+            return
+
+        if hmac.compare_digest(password, expected_password):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("パスワードが違います。")
+
+    st.stop()
+
+require_password()
+
+st.title("Stock Analyzer")
+st.caption("株価・出来高・テクニカル指標・買い候補スコアを確認するためのダッシュボードです。")
 
 
 @st.cache_data(ttl=300)
