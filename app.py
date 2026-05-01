@@ -959,6 +959,10 @@ def run_symbol_backtest_cached(
     trailing_stop_pct: float,
     stop_loss_pct: float,
     take_profit_pct: float,
+    min_hold_days: int,
+    ma_break_confirm_days: int,
+    ma_break_buffer_pct: float,
+    emergency_stop_pct: float,
     analysis_name: str = "",
 ) -> tuple[pd.DataFrame, dict]:
     """1銘柄分のバックテストを実行する。"""
@@ -982,10 +986,37 @@ def run_symbol_backtest_cached(
     labels = ma_labels(ma_short, ma_mid, ma_long)
     trend_required = [labels["short"], labels["mid"]]
 
-    def decide_exit(j: int, entry_price: float, highest_close: float) -> str | None:
+    def is_confirmed_ma_break(j: int) -> bool:
+        """MA割れを単発ではなく、連続日数＋許容幅で確認する。"""
+        confirm_days = max(1, int(ma_break_confirm_days))
+        if j - confirm_days + 1 < 0:
+            return False
+
+        buffer_rate = max(0.0, float(ma_break_buffer_pct)) / 100
+        for k in range(j - confirm_days + 1, j + 1):
+            row = df.iloc[k]
+            if row[trend_required].isna().any():
+                return False
+            close_k = float(row["Close"])
+            ma_mid_k = float(row[labels["mid"]])
+            # MAを少し下回っただけではノイズ扱い。例：許容幅2%なら MA25×0.98 未満で初めて割れ判定。
+            if close_k >= ma_mid_k * (1 - buffer_rate):
+                return False
+        return True
+
+    def decide_exit(j: int, entry_price: float, highest_close: float, hold_days: int) -> str | None:
         close = float(df.iloc[j]["Close"])
+        ret_pct = (close / entry_price - 1) * 100 if entry_price > 0 else 0.0
         signal = calculate_buy_score_at(df, j, ma_short, ma_mid, ma_long)
         reasons = []
+
+        # 最低保有期間中でも、致命的な下落だけは例外的に逃げる。
+        if emergency_stop_pct > 0 and ret_pct <= -float(emergency_stop_pct):
+            return f"緊急損切り-{float(emergency_stop_pct):.1f}%"
+
+        # 買ってすぐの数日は、MA割れ・スコア悪化・トレーリングをノイズとして無視する。
+        if hold_days < int(min_hold_days):
+            return None
 
         if exit_rule in ["スコア悪化", "複合"]:
             if signal["score"] <= exit_score:
@@ -994,22 +1025,25 @@ def run_symbol_backtest_cached(
         if exit_rule in ["トレンド崩れ", "複合"]:
             row = df.iloc[j]
             if not row[trend_required].isna().any():
-                if close < float(row[labels["mid"]]):
-                    reasons.append(f"終値<{labels['mid']}")
-                if float(row[labels["short"]]) < float(row[labels["mid"]]):
-                    reasons.append(f"{labels['short']}<{labels['mid']}")
+                ma_short_now = float(row[labels["short"]])
+                ma_mid_now = float(row[labels["mid"]])
+                # 終値<MA25単発では売らない。連続MA割れ＋短期MAも中期MA未満の場合だけ売却候補。
+                if is_confirmed_ma_break(j) and ma_short_now < ma_mid_now:
+                    reasons.append(
+                        f"終値<{labels['mid']} {int(ma_break_confirm_days)}日連続"
+                        f" / 許容幅{float(ma_break_buffer_pct):.1f}%"
+                        f" / {labels['short']}<{labels['mid']}"
+                    )
 
         if exit_rule in ["トレーリングストップ", "複合"]:
             if highest_close > 0 and close <= highest_close * (1 - trailing_stop_pct / 100):
                 reasons.append(f"高値から-{trailing_stop_pct:.1f}%")
 
         if exit_rule in ["利確/損切り", "複合"]:
-            if entry_price > 0:
-                ret_pct = (close / entry_price - 1) * 100
-                if stop_loss_pct > 0 and ret_pct <= -stop_loss_pct:
-                    reasons.append(f"損切り-{stop_loss_pct:.1f}%")
-                if take_profit_pct > 0 and ret_pct >= take_profit_pct:
-                    reasons.append(f"利確+{take_profit_pct:.1f}%")
+            if stop_loss_pct > 0 and ret_pct <= -stop_loss_pct:
+                reasons.append(f"損切り-{stop_loss_pct:.1f}%")
+            if take_profit_pct > 0 and ret_pct >= take_profit_pct:
+                reasons.append(f"利確+{take_profit_pct:.1f}%")
 
         return " / ".join(reasons) if reasons else None
 
@@ -1045,7 +1079,8 @@ def run_symbol_backtest_cached(
                 close_j = float(df.iloc[j]["Close"])
                 if close_j > highest_close:
                     highest_close = close_j
-                reason = decide_exit(j, entry_price, highest_close)
+                hold_days_j = int(j - entry_idx)
+                reason = decide_exit(j, entry_price, highest_close, hold_days_j)
                 if reason:
                     exit_idx = j
                     exit_reason = reason
@@ -1067,6 +1102,10 @@ def run_symbol_backtest_cached(
                 "entry_price": entry_price,
                 "exit_price": exit_price,
                 "max_hold_days": int(max_hold_days),
+                "min_hold_days": int(min_hold_days),
+                "ma_break_confirm_days": int(ma_break_confirm_days),
+                "ma_break_buffer_pct": float(ma_break_buffer_pct),
+                "emergency_stop_pct": float(emergency_stop_pct),
                 "hold_days": realized_hold_days,
                 "exit_reason": exit_reason,
                 "score": signal["score"],
@@ -1128,7 +1167,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
     st.header("バックテスト")
     st.caption(
         "過去の各営業日時点で現在と同じスコア判定を行い、条件を満たした翌営業日の始値で買います。"
-        "売却は固定日数だけでなく、スコア悪化・トレンド崩れ・トレーリングストップなどで判定できます。"
+        "売却は単発のMA割れではなく、最低保有日数・連続MA割れ・許容幅でノイズを抑えて判定できます。"
     )
 
     with st.expander("バックテスト条件", expanded=True):
@@ -1164,6 +1203,44 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
         with e4:
             stop_loss_pct = st.slider("固定損切り%", 0.0, 40.0, 10.0, 0.5, help="0%にすると無効です。")
 
+        n1, n2, n3, n4 = st.columns(4)
+        with n1:
+            min_hold_days = st.slider(
+                "最低保有営業日数",
+                min_value=0,
+                max_value=120,
+                value=10,
+                step=1,
+                help="この日数に達するまでは、通常のスコア悪化・MA割れ・トレーリング損切りでは売却しません。買付直後のノイズ対策です。",
+            )
+        with n2:
+            ma_break_confirm_days = st.slider(
+                "MA割れ確認日数",
+                min_value=1,
+                max_value=20,
+                value=3,
+                step=1,
+                help="終値が中期MAを何営業日連続で下回ったら、MA割れと認定するかです。",
+            )
+        with n3:
+            ma_break_buffer_pct = st.slider(
+                "MA割れ許容幅%",
+                min_value=0.0,
+                max_value=10.0,
+                value=2.0,
+                step=0.5,
+                help="終値がMAを少し下回っただけでは売らないための余白です。2%なら MA×0.98 未満で割れ判定します。",
+            )
+        with n4:
+            emergency_stop_pct = st.slider(
+                "緊急損切り%",
+                min_value=0.0,
+                max_value=50.0,
+                value=18.0,
+                step=0.5,
+                help="最低保有期間中でも、この下落率を超えた場合だけ例外的に売却します。0%で無効です。",
+            )
+
         p1, p2, p3, p4 = st.columns(4)
         with p1:
             take_profit_pct = st.slider("固定利確%", 0.0, 200.0, 0.0, 1.0, help="0%にすると無効です。長期トレンド検証では無効推奨です。")
@@ -1178,7 +1255,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
         with m1:
             max_symbols = st.selectbox("検証対象数", ["先頭30件", "先頭100件", "すべて"], index=0 if not is_fund_file else 1)
         with m2:
-            st.caption("推奨初期値：買いScore 9以上 / 最大250〜1250営業日 / 売却ルール=複合 / 利確0%。")
+            st.caption("推奨初期値：買いScore 9以上 / 最大250〜1250営業日 / 最低保有10〜20日 / MA割れ3〜5日連続 / 許容幅2〜3% / 利確0%。")
 
     if not validate_ma_values(int(bt_ma_short), int(bt_ma_mid), int(bt_ma_long)):
         st.stop()
@@ -1216,6 +1293,10 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 float(trailing_stop_pct),
                 float(stop_loss_pct),
                 float(take_profit_pct),
+                int(min_hold_days),
+                int(ma_break_confirm_days),
+                float(ma_break_buffer_pct),
+                float(emergency_stop_pct),
                 analysis_name_for_row(row),
             )
             if not trades_df.empty:
@@ -1234,6 +1315,10 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
             "trailing_stop_pct": trailing_stop_pct,
             "stop_loss_pct": stop_loss_pct,
             "take_profit_pct": take_profit_pct,
+            "min_hold_days": min_hold_days,
+            "ma_break_confirm_days": ma_break_confirm_days,
+            "ma_break_buffer_pct": ma_break_buffer_pct,
+            "emergency_stop_pct": emergency_stop_pct,
             "ma": f"MA{int(bt_ma_short)}/MA{int(bt_ma_mid)}/MA{int(bt_ma_long)}",
             "no_overlap": no_overlap,
             "symbols": len(target_watchlist),
@@ -1250,10 +1335,10 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
     st.subheader("検証条件")
     st.write(
         f"期間: {params.get('period')} / 買い: Score {params.get('entry_score')}以上 / "
-        f"最大保有: {params.get('max_hold_days')}営業日 / 売却: {params.get('exit_rule')} / "
-        f"売却Score: {params.get('exit_score')}以下 / トレーリング: {params.get('trailing_stop_pct')}% / "
-        f"損切り: {params.get('stop_loss_pct')}% / 利確: {params.get('take_profit_pct')}% / "
-        f"MA: {params.get('ma')} / 対象: {params.get('symbols')}件"
+        f"最大保有: {params.get('max_hold_days')}営業日 / 最低保有: {params.get('min_hold_days')}営業日 / 売却: {params.get('exit_rule')} / "
+        f"売却Score: {params.get('exit_score')}以下 / MA割れ: {params.get('ma_break_confirm_days')}日連続・許容幅{params.get('ma_break_buffer_pct')}% / "
+        f"トレーリング: {params.get('trailing_stop_pct')}% / 損切り: {params.get('stop_loss_pct')}% / 緊急損切り: {params.get('emergency_stop_pct')}% / "
+        f"利確: {params.get('take_profit_pct')}% / MA: {params.get('ma')} / 対象: {params.get('symbols')}件"
     )
 
     c1, c2, c3, c4 = st.columns(4)
@@ -1324,7 +1409,9 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
         detail_cols = [
             "signal_date", "entry_date", "exit_date", "symbol", "name",
             *( ["analysis_symbol"] if is_fund_file else [] ),
-            "score", "status", "entry_price", "exit_price", "hold_days", "exit_reason", "return_pct", "win",
+            "score", "status", "entry_price", "exit_price", "hold_days", "min_hold_days",
+            "ma_break_confirm_days", "ma_break_buffer_pct", "emergency_stop_pct",
+            "exit_reason", "return_pct", "win",
         ]
         detail_cols = [col for col in detail_cols if col in detail.columns]
         st.dataframe(detail[detail_cols], use_container_width=True, hide_index=True)
@@ -1514,7 +1601,7 @@ def set_mode(mode: str, symbol: str | None = None):
 
 
 st.sidebar.header("表示メニュー")
-st.sidebar.caption("app version: backtest-20260501")
+st.sidebar.caption("app version: backtest-noise-filter-v4-20260502")
 
 watchlist_files = find_watchlist_files()
 if watchlist_files:
