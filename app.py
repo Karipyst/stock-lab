@@ -940,6 +940,8 @@ def calculate_buy_score_at(
 
 
 @st.cache_data(ttl=1800)
+
+@st.cache_data(ttl=1800)
 def run_symbol_backtest_cached(
     symbol: str,
     name: str,
@@ -950,8 +952,13 @@ def run_symbol_backtest_cached(
     ma_mid: int,
     ma_long: int,
     entry_score: int,
-    hold_days: int,
+    max_hold_days: int,
     no_overlap: bool,
+    exit_rule: str,
+    exit_score: int,
+    trailing_stop_pct: float,
+    stop_loss_pct: float,
+    take_profit_pct: float,
     analysis_name: str = "",
 ) -> tuple[pd.DataFrame, dict]:
     """1銘柄分のバックテストを実行する。"""
@@ -959,45 +966,116 @@ def run_symbol_backtest_cached(
     data_symbol = used_data_symbol or (data_candidates_tuple[0] if data_candidates_tuple else symbol)
 
     if df.empty:
-        return pd.DataFrame(), {"symbol": symbol, "name": name, "theme": theme, "analysis_symbol": data_symbol, "analysis_name": analysis_name, "trades": 0, "status": "取得失敗"}
+        return pd.DataFrame(), {
+            "symbol": symbol,
+            "name": name,
+            "theme": theme,
+            "analysis_symbol": data_symbol,
+            "analysis_name": analysis_name,
+            "trades": 0,
+            "status": "取得失敗",
+        }
 
     df = add_indicators(df, ma_short, ma_mid, ma_long)
     df = df.dropna(subset=["Open", "Close"]).copy()
 
+    labels = ma_labels(ma_short, ma_mid, ma_long)
+    trend_required = [labels["short"], labels["mid"]]
+
+    def decide_exit(j: int, entry_price: float, highest_close: float) -> str | None:
+        close = float(df.iloc[j]["Close"])
+        signal = calculate_buy_score_at(df, j, ma_short, ma_mid, ma_long)
+        reasons = []
+
+        if exit_rule in ["スコア悪化", "複合"]:
+            if signal["score"] <= exit_score:
+                reasons.append(f"スコア悪化<= {exit_score}")
+
+        if exit_rule in ["トレンド崩れ", "複合"]:
+            row = df.iloc[j]
+            if not row[trend_required].isna().any():
+                if close < float(row[labels["mid"]]):
+                    reasons.append(f"終値<{labels['mid']}")
+                if float(row[labels["short"]]) < float(row[labels["mid"]]):
+                    reasons.append(f"{labels['short']}<{labels['mid']}")
+
+        if exit_rule in ["トレーリングストップ", "複合"]:
+            if highest_close > 0 and close <= highest_close * (1 - trailing_stop_pct / 100):
+                reasons.append(f"高値から-{trailing_stop_pct:.1f}%")
+
+        if exit_rule in ["利確/損切り", "複合"]:
+            if entry_price > 0:
+                ret_pct = (close / entry_price - 1) * 100
+                if stop_loss_pct > 0 and ret_pct <= -stop_loss_pct:
+                    reasons.append(f"損切り-{stop_loss_pct:.1f}%")
+                if take_profit_pct > 0 and ret_pct >= take_profit_pct:
+                    reasons.append(f"利確+{take_profit_pct:.1f}%")
+
+        return " / ".join(reasons) if reasons else None
+
     trades = []
     i = 1
-    last_entry_limit = len(df) - hold_days - 2
-    while i <= last_entry_limit:
+    last_signal_index = len(df) - 2
+
+    while i <= last_signal_index:
         signal = calculate_buy_score_at(df, i, ma_short, ma_mid, ma_long)
-        if signal["score"] >= entry_score:
-            entry_idx = i + 1
-            exit_idx = entry_idx + hold_days
-            if exit_idx >= len(df):
-                break
-            entry_price = float(df.iloc[entry_idx]["Open"])
-            exit_price = float(df.iloc[exit_idx]["Close"])
-            if entry_price > 0 and exit_price > 0:
-                return_pct = (exit_price / entry_price - 1) * 100
-                trades.append({
-                    "symbol": symbol,
-                    "name": name,
-                    "theme": theme,
-                    "analysis_symbol": data_symbol,
-                    "analysis_name": analysis_name,
-                    "signal_date": df.index[i],
-                    "entry_date": df.index[entry_idx],
-                    "exit_date": df.index[exit_idx],
-                    "entry_price": entry_price,
-                    "exit_price": exit_price,
-                    "hold_days": hold_days,
-                    "score": signal["score"],
-                    "status": signal["status"],
-                    "return_pct": return_pct,
-                    "win": return_pct > 0,
-                })
-            i = exit_idx if no_overlap else i + 1
-        else:
+        if signal["score"] < entry_score:
             i += 1
+            continue
+
+        entry_idx = i + 1
+        if entry_idx >= len(df):
+            break
+
+        entry_price = float(df.iloc[entry_idx]["Open"])
+        if entry_price <= 0 or pd.isna(entry_price):
+            i += 1
+            continue
+
+        exit_limit = min(entry_idx + int(max_hold_days), len(df) - 1)
+        if exit_limit <= entry_idx:
+            break
+
+        exit_idx = exit_limit
+        exit_reason = "最大保有日数"
+        highest_close = float(df.iloc[entry_idx]["Close"])
+
+        if exit_rule != "最大保有日数のみ":
+            for j in range(entry_idx + 1, exit_limit + 1):
+                close_j = float(df.iloc[j]["Close"])
+                if close_j > highest_close:
+                    highest_close = close_j
+                reason = decide_exit(j, entry_price, highest_close)
+                if reason:
+                    exit_idx = j
+                    exit_reason = reason
+                    break
+
+        exit_price = float(df.iloc[exit_idx]["Close"])
+        if exit_price > 0:
+            return_pct = (exit_price / entry_price - 1) * 100
+            realized_hold_days = int(exit_idx - entry_idx)
+            trades.append({
+                "symbol": symbol,
+                "name": name,
+                "theme": theme,
+                "analysis_symbol": data_symbol,
+                "analysis_name": analysis_name,
+                "signal_date": df.index[i],
+                "entry_date": df.index[entry_idx],
+                "exit_date": df.index[exit_idx],
+                "entry_price": entry_price,
+                "exit_price": exit_price,
+                "max_hold_days": int(max_hold_days),
+                "hold_days": realized_hold_days,
+                "exit_reason": exit_reason,
+                "score": signal["score"],
+                "status": signal["status"],
+                "return_pct": return_pct,
+                "win": return_pct > 0,
+            })
+
+        i = exit_idx if no_overlap else i + 1
 
     trades_df = pd.DataFrame(trades)
     if not trades_df.empty:
@@ -1015,6 +1093,7 @@ def run_symbol_backtest_cached(
             "median_return_pct": float(trades_df["return_pct"].median()),
             "best_return_pct": float(trades_df["return_pct"].max()),
             "worst_return_pct": float(trades_df["return_pct"].min()),
+            "avg_hold_days": float(trades_df["hold_days"].mean()),
             "compounded_return_pct": float(compounded * 100),
             "status": "OK",
         }
@@ -1031,6 +1110,7 @@ def run_symbol_backtest_cached(
             "median_return_pct": None,
             "best_return_pct": None,
             "worst_return_pct": None,
+            "avg_hold_days": None,
             "compounded_return_pct": None,
             "status": "該当シグナルなし",
         }
@@ -1046,28 +1126,59 @@ def run_symbol_backtest_cached(
 
 def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
     st.header("バックテスト")
-    st.caption("過去の各営業日時点で現在と同じスコア判定を行い、条件を満たした翌営業日の始値で買い、指定日数後の終値で売った場合の成績を検証します。")
+    st.caption(
+        "過去の各営業日時点で現在と同じスコア判定を行い、条件を満たした翌営業日の始値で買います。"
+        "売却は固定日数だけでなく、スコア悪化・トレンド崩れ・トレーリングストップなどで判定できます。"
+    )
 
     with st.expander("バックテスト条件", expanded=True):
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            period_value = st.selectbox("検証期間", ["6mo", "1y", "2y", "5y"], index=2)
+            period_value = st.selectbox("検証期間", ["1y", "2y", "5y", "10y"], index=2)
         with c2:
             entry_score = st.slider("買いシグナルの最低スコア", 3, 12, 9, 1)
         with c3:
-            hold_days = st.slider("保有営業日数", 1, 60, 20, 1)
+            max_hold_days = st.slider(
+                "最大保有営業日数",
+                min_value=5,
+                max_value=1250,
+                value=250,
+                step=5,
+                help="約250営業日=約1年、約1250営業日=約5年です。売却条件に該当しない場合の最終期限として使います。",
+            )
         with c4:
             no_overlap = st.checkbox("同一銘柄の重複保有をしない", value=True)
 
-        m1, m2, m3, m4 = st.columns(4)
-        with m1:
+        e1, e2, e3, e4 = st.columns(4)
+        with e1:
+            exit_rule = st.selectbox(
+                "売却ルール",
+                ["複合", "スコア悪化", "トレンド崩れ", "トレーリングストップ", "利確/損切り", "最大保有日数のみ"],
+                index=0,
+                help="おすすめは『複合』です。トレンドが続く間は保有し、崩れたら売却します。",
+            )
+        with e2:
+            exit_score = st.slider("売却スコア閾値", 0, 8, 4, 1, help="スコアがこの値以下になったら売却候補にします。")
+        with e3:
+            trailing_stop_pct = st.slider("トレーリング損切り%", 1.0, 40.0, 12.0, 0.5)
+        with e4:
+            stop_loss_pct = st.slider("固定損切り%", 0.0, 40.0, 10.0, 0.5, help="0%にすると無効です。")
+
+        p1, p2, p3, p4 = st.columns(4)
+        with p1:
+            take_profit_pct = st.slider("固定利確%", 0.0, 200.0, 0.0, 1.0, help="0%にすると無効です。長期トレンド検証では無効推奨です。")
+        with p2:
             bt_ma_short = st.number_input("短期MA", min_value=1, max_value=100, value=int(st.session_state.get("ma_short", 5)), step=1)
-        with m2:
-            bt_ma_mid = st.number_input("中期MA", min_value=2, max_value=200, value=int(st.session_state.get("ma_mid", 25)), step=1)
-        with m3:
-            bt_ma_long = st.number_input("長期MA", min_value=3, max_value=300, value=int(st.session_state.get("ma_long", 75)), step=1)
-        with m4:
+        with p3:
+            bt_ma_mid = st.number_input("中期MA", min_value=2, max_value=250, value=int(st.session_state.get("ma_mid", 25)), step=1)
+        with p4:
+            bt_ma_long = st.number_input("長期MA", min_value=3, max_value=500, value=int(st.session_state.get("ma_long", 75)), step=1)
+
+        m1, m2 = st.columns(2)
+        with m1:
             max_symbols = st.selectbox("検証対象数", ["先頭30件", "先頭100件", "すべて"], index=0 if not is_fund_file else 1)
+        with m2:
+            st.caption("推奨初期値：買いScore 9以上 / 最大250〜1250営業日 / 売却ルール=複合 / 利確0%。")
 
     if not validate_ma_values(int(bt_ma_short), int(bt_ma_mid), int(bt_ma_long)):
         st.stop()
@@ -1089,9 +1200,23 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
         for idx, (_, row) in enumerate(target_watchlist.iterrows(), start=1):
             candidates = tuple(analysis_candidates_for_row(row))
             trades_df, summary = run_symbol_backtest_cached(
-                str(row["symbol"]), str(row["name"]), str(row["theme"]), candidates,
-                period_value, int(bt_ma_short), int(bt_ma_mid), int(bt_ma_long),
-                int(entry_score), int(hold_days), bool(no_overlap), analysis_name_for_row(row),
+                str(row["symbol"]),
+                str(row["name"]),
+                str(row["theme"]),
+                candidates,
+                period_value,
+                int(bt_ma_short),
+                int(bt_ma_mid),
+                int(bt_ma_long),
+                int(entry_score),
+                int(max_hold_days),
+                bool(no_overlap),
+                str(exit_rule),
+                int(exit_score),
+                float(trailing_stop_pct),
+                float(stop_loss_pct),
+                float(take_profit_pct),
+                analysis_name_for_row(row),
             )
             if not trades_df.empty:
                 all_trades.append(trades_df)
@@ -1103,7 +1228,12 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
         st.session_state["backtest_params"] = {
             "period": period_value,
             "entry_score": entry_score,
-            "hold_days": hold_days,
+            "max_hold_days": max_hold_days,
+            "exit_rule": exit_rule,
+            "exit_score": exit_score,
+            "trailing_stop_pct": trailing_stop_pct,
+            "stop_loss_pct": stop_loss_pct,
+            "take_profit_pct": take_profit_pct,
             "ma": f"MA{int(bt_ma_short)}/MA{int(bt_ma_mid)}/MA{int(bt_ma_long)}",
             "no_overlap": no_overlap,
             "symbols": len(target_watchlist),
@@ -1118,34 +1248,72 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
 
     valid = summary_df[summary_df["trades"] > 0].copy()
     st.subheader("検証条件")
-    st.write(f"期間: {params.get('period')} / シグナル: Score {params.get('entry_score')}以上 / 保有: {params.get('hold_days')}営業日 / MA: {params.get('ma')} / 対象: {params.get('symbols')}件")
+    st.write(
+        f"期間: {params.get('period')} / 買い: Score {params.get('entry_score')}以上 / "
+        f"最大保有: {params.get('max_hold_days')}営業日 / 売却: {params.get('exit_rule')} / "
+        f"売却Score: {params.get('exit_score')}以下 / トレーリング: {params.get('trailing_stop_pct')}% / "
+        f"損切り: {params.get('stop_loss_pct')}% / 利確: {params.get('take_profit_pct')}% / "
+        f"MA: {params.get('ma')} / 対象: {params.get('symbols')}件"
+    )
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("検証銘柄数", len(summary_df))
     c2.metric("シグナル発生銘柄", len(valid))
     c3.metric("総トレード数", int(valid["trades"].sum()) if not valid.empty else 0)
     c4.metric("全体勝率", f"{trades_df['win'].mean() * 100:.1f}%" if not trades_df.empty else "-")
-    c5, c6, c7 = st.columns(3)
+    c5, c6, c7, c8 = st.columns(4)
     c5.metric("平均リターン/回", f"{trades_df['return_pct'].mean():.2f}%" if not trades_df.empty else "-")
     c6.metric("中央値リターン/回", f"{trades_df['return_pct'].median():.2f}%" if not trades_df.empty else "-")
     c7.metric("最低リターン/回", f"{trades_df['return_pct'].min():.2f}%" if not trades_df.empty else "-")
+    c8.metric("平均保有日数", f"{trades_df['hold_days'].mean():.1f}日" if not trades_df.empty else "-")
 
     st.subheader("銘柄別サマリー")
     display_summary = summary_df.copy()
-    for col in ["win_rate", "avg_return_pct", "median_return_pct", "best_return_pct", "worst_return_pct", "compounded_return_pct", "buy_hold_return_pct"]:
+    for col in ["win_rate", "avg_return_pct", "median_return_pct", "best_return_pct", "worst_return_pct", "avg_hold_days", "compounded_return_pct", "buy_hold_return_pct"]:
         if col in display_summary.columns:
             display_summary[col] = display_summary[col].map(lambda x: None if pd.isna(x) else round(float(x), 2))
     display_summary = display_summary.sort_values(["avg_return_pct", "win_rate", "trades"], ascending=[False, False, False], na_position="last")
-    summary_cols = ["symbol", "name", "theme", *( ["analysis_symbol", "analysis_name"] if is_fund_file else [] ), "trades", "win_rate", "avg_return_pct", "median_return_pct", "best_return_pct", "worst_return_pct", "compounded_return_pct", "buy_hold_return_pct", "status"]
+    summary_cols = [
+        "symbol", "name", "theme",
+        *( ["analysis_symbol", "analysis_name"] if is_fund_file else [] ),
+        "trades", "win_rate", "avg_return_pct", "median_return_pct", "best_return_pct", "worst_return_pct",
+        "avg_hold_days", "compounded_return_pct", "buy_hold_return_pct", "status",
+    ]
     summary_cols = [col for col in summary_cols if col in display_summary.columns]
-    st.dataframe(display_summary[summary_cols], use_container_width=True, hide_index=True, column_config={
-        "symbol": "管理ID" if is_fund_file else "銘柄コード", "name": "ファンド名" if is_fund_file else "銘柄名", "theme": "テーマ",
-        "analysis_symbol": "分析用ティッカー", "analysis_name": "分析用プロキシ", "trades": "取引数", "win_rate": "勝率%",
-        "avg_return_pct": "平均%", "median_return_pct": "中央値%", "best_return_pct": "最大%", "worst_return_pct": "最小%",
-        "compounded_return_pct": "単純複利%", "buy_hold_return_pct": "期間保有%", "status": "状態",
-    })
+    st.dataframe(
+        display_summary[summary_cols],
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "symbol": "管理ID" if is_fund_file else "銘柄コード",
+            "name": "ファンド名" if is_fund_file else "銘柄名",
+            "theme": "テーマ",
+            "analysis_symbol": "分析用ティッカー",
+            "analysis_name": "分析用プロキシ",
+            "trades": "取引数",
+            "win_rate": "勝率%",
+            "avg_return_pct": "平均%",
+            "median_return_pct": "中央値%",
+            "best_return_pct": "最大%",
+            "worst_return_pct": "最小%",
+            "avg_hold_days": "平均保有日数",
+            "compounded_return_pct": "単純複利%",
+            "buy_hold_return_pct": "期間保有%",
+            "status": "状態",
+        },
+    )
 
     if not trades_df.empty:
+        st.subheader("売却理由")
+        reason_counts = trades_df["exit_reason"].value_counts().reset_index()
+        reason_counts.columns = ["売却理由", "件数"]
+        st.dataframe(reason_counts, use_container_width=True, hide_index=True)
+
+        fig_reason = go.Figure()
+        fig_reason.add_trace(go.Bar(x=reason_counts["売却理由"], y=reason_counts["件数"], name="売却理由"))
+        fig_reason.update_layout(height=320, margin=dict(l=10, r=10, t=24, b=10), xaxis_title="売却理由", yaxis_title="件数")
+        st.plotly_chart(fig_reason, use_container_width=True)
+
         st.subheader("トレード明細")
         detail = trades_df.sort_values("entry_date", ascending=False).copy()
         for col in ["entry_date", "exit_date", "signal_date"]:
@@ -1153,7 +1321,11 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
         detail["entry_price"] = detail["entry_price"].round(2)
         detail["exit_price"] = detail["exit_price"].round(2)
         detail["return_pct"] = detail["return_pct"].round(2)
-        detail_cols = ["signal_date", "entry_date", "exit_date", "symbol", "name", *( ["analysis_symbol"] if is_fund_file else [] ), "score", "status", "entry_price", "exit_price", "return_pct", "win"]
+        detail_cols = [
+            "signal_date", "entry_date", "exit_date", "symbol", "name",
+            *( ["analysis_symbol"] if is_fund_file else [] ),
+            "score", "status", "entry_price", "exit_price", "hold_days", "exit_reason", "return_pct", "win",
+        ]
         detail_cols = [col for col in detail_cols if col in detail.columns]
         st.dataframe(detail[detail_cols], use_container_width=True, hide_index=True)
 
@@ -1166,7 +1338,11 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
         csv = detail.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
         st.download_button("トレード明細CSVをダウンロード", data=csv, file_name="backtest_trades.csv", mime="text/csv")
 
-    st.warning("このバックテストは、現在のスコア条件が過去に出た場合の機械的な検証です。手数料・税金・スリッページ・分配金・為替ヘッジ差・投資信託本体の基準価額差は反映していません。")
+    st.warning(
+        "このバックテストは、現在のスコア条件が過去に出た場合の機械的な検証です。"
+        "手数料・税金・スリッページ・分配金・為替ヘッジ差・投資信託本体の基準価額差は反映していません。"
+        "特に投資信託CSVでは、analysis_symbolのプロキシETF/指数による近似です。"
+    )
 
 def draw_price_chart(
     df: pd.DataFrame,
