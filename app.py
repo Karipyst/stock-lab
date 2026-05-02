@@ -23,7 +23,7 @@ HISTORY_PATH = Path("score_history.csv")
 BACKTEST_CONDITIONS_PATH = Path("backtest_conditions.csv")
 
 BACKTEST_CONDITION_SPECS = {
-    "condition_name": {"type": "str", "default": "next_score_exit_off_ma_on_cd20", "label": "条件名"},
+    "condition_name": {"type": "str", "default": "quality_filter_v1", "label": "条件名"},
     "period_value": {"type": "str", "default": "5y", "label": "検証期間"},
     "entry_score": {"type": "int", "default": 11, "label": "買いシグナルの最低スコア"},
     "max_hold_days": {"type": "int", "default": 250, "label": "最大保有営業日数"},
@@ -49,8 +49,8 @@ BACKTEST_CONDITION_SPECS = {
     "bt_ma_mid": {"type": "int", "default": 25, "label": "中期MA"},
     "bt_ma_long": {"type": "int", "default": 75, "label": "長期MA"},
     "use_tiered_trailing": {"type": "bool", "default": True, "label": "含み益別トレーリングを使う"},
-    "buy_filter_ma_deviation_pct": {"type": "float", "default": 15.0, "label": "買い除外: MA乖離率上限%"},
-    "buy_filter_return_5d_pct": {"type": "float", "default": 10.0, "label": "買い除外: 5日上昇率上限%"},
+    "buy_filter_ma_deviation_pct": {"type": "float", "default": 8.0, "label": "買い除外: MA乖離率上限%"},
+    "buy_filter_return_5d_pct": {"type": "float", "default": 5.0, "label": "買い除外: 5日上昇率上限%"},
     "min_hold_stop_loss_exception": {"type": "bool", "default": True, "label": "最低保有中も通常損切りを許可"},
     "tier1_profit_pct": {"type": "float", "default": 8.0, "label": "段階1: 最大含み益%"},
     "tier1_trailing_pct": {"type": "float", "default": 6.0, "label": "段階1: 高値から-%"},
@@ -63,11 +63,19 @@ BACKTEST_CONDITION_SPECS = {
     "peak_score_drop_points": {"type": "int", "default": 4, "label": "ピークScoreからの低下pt"},
     "peak_score_profit_pct": {"type": "float", "default": 5.0, "label": "ピークScore売却の最低含み益%"},
     "volume_confirm_next_day": {"type": "bool", "default": True, "label": "出来高急増陰線は翌日安値割れ確認"},
-    "raw_entry_score_min": {"type": "int", "default": 0, "label": "内部Raw Score最低値"},
+    "raw_entry_score_min": {"type": "int", "default": 13, "label": "内部Raw Score最低値"},
     "use_score_exit": {"type": "bool", "default": False, "label": "スコア悪化売却を使う"},
     "use_ma_break_exit": {"type": "bool", "default": True, "label": "MA25割れ売却を使う"},
     "cooldown_days_after_exit": {"type": "int", "default": 0, "label": "通常売却後クールダウン日数"},
     "cooldown_days_after_stop": {"type": "int", "default": 20, "label": "損切り後クールダウン日数"},
+    "use_early_warning_exit": {"type": "bool", "default": False, "label": "早期警戒売却を使う"},
+    "use_peak_stall_exit": {"type": "bool", "default": False, "label": "高値更新停止売却を使う"},
+    "use_volume_down_exit": {"type": "bool", "default": True, "label": "出来高急増陰線売却を使う"},
+    "buy_filter_ma_deviation_min_pct": {"type": "float", "default": 0.0, "label": "買い除外: MA乖離率下限%"},
+    "buy_filter_return_5d_min_pct": {"type": "float", "default": -5.0, "label": "買い除外: 5日上昇率下限%"},
+    "buy_filter_rsi_min": {"type": "float", "default": 55.0, "label": "買い除外: RSI下限"},
+    "buy_filter_rsi_max": {"type": "float", "default": 65.0, "label": "買い除外: RSI上限"},
+    "buy_filter_volume_ratio_max": {"type": "float", "default": 2.0, "label": "買い除外: 出来高倍率上限"},
     "max_symbols": {"type": "str", "default": "先頭100件", "label": "検証対象数"},
 }
 
@@ -1234,6 +1242,14 @@ def run_symbol_backtest_cached(
     use_ma_break_exit: bool,
     cooldown_days_after_exit: int,
     cooldown_days_after_stop: int,
+    use_early_warning_exit: bool,
+    use_peak_stall_exit: bool,
+    use_volume_down_exit: bool,
+    buy_filter_ma_deviation_min_pct: float,
+    buy_filter_return_5d_min_pct: float,
+    buy_filter_rsi_min: float,
+    buy_filter_rsi_max: float,
+    buy_filter_volume_ratio_max: float,
     analysis_name: str = "",
 ) -> tuple[pd.DataFrame, dict]:
     """1銘柄分のバックテストを実行する。"""
@@ -1416,15 +1432,15 @@ def run_symbol_backtest_cached(
 
         if exit_rule == "早期警戒付き複合":
             close_below_short_ma = bool(not pd.isna(row_now.get(labels["short"])) and close < float(row_now[labels["short"]]))
-            if is_early_score_warning(j, entry_signal_score) and close_below_short_ma:
+            if bool(use_early_warning_exit) and is_early_score_warning(j, entry_signal_score) and close_below_short_ma:
                 reasons.append(f"早期警戒: Score<={int(warning_score)} または買い時から-{int(score_drop_points)}pt / 終値<{labels['short']}")
             if int(peak_score_drop_points) > 0 and ret_pct >= float(peak_score_profit_pct) and int(peak_score) - int(calculate_buy_score_at(df, j, ma_short, ma_mid, ma_long)["score"]) >= int(peak_score_drop_points) and close_below_short_ma:
                 reasons.append(f"ピークScoreから-{int(peak_score_drop_points)}pt / 含み益{float(peak_score_profit_pct):.1f}%以上 / 終値<{labels['short']}")
-            if is_peak_stall_exit(j, entry_idx, highest_close):
+            if bool(use_peak_stall_exit) and is_peak_stall_exit(j, entry_idx, highest_close):
                 reasons.append(f"高値更新停止{int(peak_stall_days)}日 / 高値から-{float(peak_pullback_pct):.1f}%")
             if is_short_momentum_exit(j):
                 reasons.append(f"短期モメンタム悪化{int(momentum_confirm_days)}日 / 終値<{labels['short']}")
-            if is_volume_down_exit(j):
+            if bool(use_volume_down_exit) and is_volume_down_exit(j):
                 suffix = "翌日安値割れ" if bool(volume_confirm_next_day) else "当日判定"
                 reasons.append(f"出来高急増陰線 {float(volume_drop_pct):.1f}%超下落 / 出来高{float(volume_spike_ratio):.1f}倍 / {suffix}")
 
@@ -1461,14 +1477,36 @@ def run_symbol_backtest_cached(
 
         signal_row = df.iloc[i]
         # 短期急騰・中期MAからの過熱乖離は、天井掴みを避けるため買い除外できる。
-        if buy_filter_ma_deviation_pct > 0 and not pd.isna(signal_row.get(labels["mid"])):
+        # あわせて、弱すぎる押し目・RSI過熱/弱すぎ・出来高過熱も除外できる。
+        if not pd.isna(signal_row.get(labels["mid"])):
             ma_mid_now = float(signal_row[labels["mid"]])
             close_now = float(signal_row["Close"])
-            if ma_mid_now > 0 and close_now >= ma_mid_now * (1 + float(buy_filter_ma_deviation_pct) / 100):
+            if ma_mid_now > 0:
+                ma_dev_pct = (close_now / ma_mid_now - 1) * 100
+                if buy_filter_ma_deviation_pct > 0 and ma_dev_pct >= float(buy_filter_ma_deviation_pct):
+                    i += 1
+                    continue
+                if float(buy_filter_ma_deviation_min_pct) > -999 and ma_dev_pct < float(buy_filter_ma_deviation_min_pct):
+                    i += 1
+                    continue
+        if not pd.isna(signal_row.get("Return_5d")):
+            ret5 = float(signal_row["Return_5d"])
+            if buy_filter_return_5d_pct > 0 and ret5 >= float(buy_filter_return_5d_pct):
                 i += 1
                 continue
-        if buy_filter_return_5d_pct > 0 and not pd.isna(signal_row.get("Return_5d")):
-            if float(signal_row["Return_5d"]) >= float(buy_filter_return_5d_pct):
+            if float(buy_filter_return_5d_min_pct) > -999 and ret5 < float(buy_filter_return_5d_min_pct):
+                i += 1
+                continue
+        if not pd.isna(signal_row.get("RSI")):
+            rsi_now = float(signal_row["RSI"])
+            if float(buy_filter_rsi_min) > 0 and rsi_now < float(buy_filter_rsi_min):
+                i += 1
+                continue
+            if float(buy_filter_rsi_max) > 0 and rsi_now > float(buy_filter_rsi_max):
+                i += 1
+                continue
+        if float(buy_filter_volume_ratio_max) > 0 and not pd.isna(signal_row.get("Volume_Ratio")):
+            if float(signal_row["Volume_Ratio"]) > float(buy_filter_volume_ratio_max):
                 i += 1
                 continue
 
@@ -1541,6 +1579,14 @@ def run_symbol_backtest_cached(
                 "peak_score_profit_pct": float(peak_score_profit_pct),
                 "volume_confirm_next_day": bool(volume_confirm_next_day),
                 "min_hold_stop_loss_exception": bool(min_hold_stop_loss_exception),
+                "use_early_warning_exit": bool(use_early_warning_exit),
+                "use_peak_stall_exit": bool(use_peak_stall_exit),
+                "use_volume_down_exit": bool(use_volume_down_exit),
+                "buy_filter_ma_deviation_min_pct": float(buy_filter_ma_deviation_min_pct),
+                "buy_filter_return_5d_min_pct": float(buy_filter_return_5d_min_pct),
+                "buy_filter_rsi_min": float(buy_filter_rsi_min),
+                "buy_filter_rsi_max": float(buy_filter_rsi_max),
+                "buy_filter_volume_ratio_max": float(buy_filter_volume_ratio_max),
                 "hold_days": realized_hold_days,
                 "exit_reason": exit_reason,
                 "score": signal["score"],
@@ -1907,11 +1953,78 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 help="損切り・緊急損切り後だけ、同一銘柄の再エントリー禁止期間を長めに設定できます。",
             )
         with z2:
-            st.caption("Raw Score、シグナル時RSI、5日上昇率、MA乖離率、スコア構成要素はバックテストCSVへ出力されます。")
+            use_early_warning_exit = st.checkbox(
+                "早期警戒売却を使う",
+                value=bool(cv("use_early_warning_exit")),
+                help="OFFにすると、Score<=早期警戒値/買い時からの低下による早期警戒売却を無効化します。",
+            )
         with z3:
-            st.caption("Score 12が本当に強いか、Raw Score 13以上だけが強いかを後から検証できます。")
+            use_peak_stall_exit = st.checkbox(
+                "高値更新停止売却を使う",
+                value=bool(cv("use_peak_stall_exit")),
+                help="OFFにすると、高値更新停止＋押し目による売却を無効化します。",
+            )
         with z4:
-            st.caption("スコア悪化/MA割れ売却OFFは、売却理由別の悪化要因を切り分けるための検証用です。")
+            use_volume_down_exit = st.checkbox(
+                "出来高急増陰線売却を使う",
+                value=bool(cv("use_volume_down_exit")),
+                help="OFFにすると、出来高急増陰線の売却判定を無効化します。",
+            )
+
+        y1, y2, y3, y4 = st.columns(4)
+        with y1:
+            buy_filter_ma_deviation_min_pct = st.slider(
+                "買い除外: MA乖離率下限%",
+                min_value=-30.0,
+                max_value=30.0,
+                value=float(cv("buy_filter_ma_deviation_min_pct")),
+                step=1.0,
+                help="シグナル日の終値が中期MAからこの割合より低い場合は買いません。-999相当は未対応のため、広く許容したい場合は-30にしてください。",
+            )
+        with y2:
+            buy_filter_return_5d_min_pct = st.slider(
+                "買い除外: 5日上昇率下限%",
+                min_value=-30.0,
+                max_value=30.0,
+                value=float(cv("buy_filter_return_5d_min_pct")),
+                step=1.0,
+                help="5日リターンがこの値未満なら、短期的に弱すぎるとして買いません。",
+            )
+        with y3:
+            buy_filter_rsi_min = st.slider(
+                "買い除外: RSI下限",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(cv("buy_filter_rsi_min")),
+                step=1.0,
+                help="RSIがこの値未満なら買いません。0で実質無効です。",
+            )
+        with y4:
+            buy_filter_rsi_max = st.slider(
+                "買い除外: RSI上限",
+                min_value=0.0,
+                max_value=100.0,
+                value=float(cv("buy_filter_rsi_max")),
+                step=1.0,
+                help="RSIがこの値を超える場合は過熱として買いません。0で無効です。",
+            )
+
+        x1, x2, x3, x4 = st.columns(4)
+        with x1:
+            buy_filter_volume_ratio_max = st.slider(
+                "買い除外: 出来高倍率上限",
+                min_value=0.0,
+                max_value=10.0,
+                value=float(cv("buy_filter_volume_ratio_max")),
+                step=0.1,
+                help="シグナル日の出来高倍率がこの値を超える場合は、短期過熱として買いません。0で無効です。",
+            )
+        with x2:
+            st.caption("Raw Score、シグナル時RSI、5日上昇率、MA乖離率、スコア構成要素はバックテストCSVへ出力されます。")
+        with x3:
+            st.caption("早期警戒/高値更新停止は今回CSVで悪化寄与が強いため、個別にOFF検証できるようにしています。")
+        with x4:
+            st.caption("次の本命条件は Raw13以上 + RSI55〜65 + MA乖離0〜8% + 5日騰落-5〜5% + 出来高2倍以下です。")
 
         m1, m2 = st.columns(2)
         with m1:
@@ -1966,6 +2079,14 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
             "use_ma_break_exit": bool(use_ma_break_exit),
             "cooldown_days_after_exit": int(cooldown_days_after_exit),
             "cooldown_days_after_stop": int(cooldown_days_after_stop),
+            "use_early_warning_exit": bool(use_early_warning_exit),
+            "use_peak_stall_exit": bool(use_peak_stall_exit),
+            "use_volume_down_exit": bool(use_volume_down_exit),
+            "buy_filter_ma_deviation_min_pct": float(buy_filter_ma_deviation_min_pct),
+            "buy_filter_return_5d_min_pct": float(buy_filter_return_5d_min_pct),
+            "buy_filter_rsi_min": float(buy_filter_rsi_min),
+            "buy_filter_rsi_max": float(buy_filter_rsi_max),
+            "buy_filter_volume_ratio_max": float(buy_filter_volume_ratio_max),
             "max_symbols": str(max_symbols),
         }
         s1, s2 = st.columns([2, 1])
@@ -2051,6 +2172,14 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 bool(use_ma_break_exit),
                 int(cooldown_days_after_exit),
                 int(cooldown_days_after_stop),
+                bool(use_early_warning_exit),
+                bool(use_peak_stall_exit),
+                bool(use_volume_down_exit),
+                float(buy_filter_ma_deviation_min_pct),
+                float(buy_filter_return_5d_min_pct),
+                float(buy_filter_rsi_min),
+                float(buy_filter_rsi_max),
+                float(buy_filter_volume_ratio_max),
                 analysis_name_for_row(row),
             )
             if not trades_df.empty:
@@ -2094,6 +2223,14 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
             "use_ma_break_exit": use_ma_break_exit,
             "cooldown_days_after_exit": cooldown_days_after_exit,
             "cooldown_days_after_stop": cooldown_days_after_stop,
+            "use_early_warning_exit": use_early_warning_exit,
+            "use_peak_stall_exit": use_peak_stall_exit,
+            "use_volume_down_exit": use_volume_down_exit,
+            "buy_filter_ma_deviation_min_pct": buy_filter_ma_deviation_min_pct,
+            "buy_filter_return_5d_min_pct": buy_filter_return_5d_min_pct,
+            "buy_filter_rsi_min": buy_filter_rsi_min,
+            "buy_filter_rsi_max": buy_filter_rsi_max,
+            "buy_filter_volume_ratio_max": buy_filter_volume_ratio_max,
             "ma": f"MA{int(bt_ma_short)}/MA{int(bt_ma_mid)}/MA{int(bt_ma_long)}",
             "no_overlap": no_overlap,
             "symbols": len(target_watchlist),
@@ -2117,10 +2254,11 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
         f"高値更新停止: {params.get('peak_stall_days')}日・押し目{params.get('peak_pullback_pct')}% / "
         f"モメンタム悪化: {params.get('momentum_confirm_days')}日＋終値<短期MA / 出来高陰線: {params.get('volume_drop_pct')}%・{params.get('volume_spike_ratio')}倍 / "
         f"利確: {params.get('take_profit_pct')}% / 段階トレーリング: {params.get('tiered_trailing') if params.get('use_tiered_trailing') else 'OFF'} / "
-        f"買い除外: MA乖離{params.get('buy_filter_ma_deviation_pct')}%以上・5日上昇{params.get('buy_filter_return_5d_pct')}%以上 / "
+        f"買い除外: MA乖離{params.get('buy_filter_ma_deviation_min_pct')}〜{params.get('buy_filter_ma_deviation_pct')}%・5日騰落{params.get('buy_filter_return_5d_min_pct')}〜{params.get('buy_filter_return_5d_pct')}%・RSI{params.get('buy_filter_rsi_min')}〜{params.get('buy_filter_rsi_max')}・出来高{params.get('buy_filter_volume_ratio_max')}倍以下 / "
         f"ピークScore悪化: -{params.get('peak_score_drop_points')}pt・含み益{params.get('peak_score_profit_pct')}%以上 / "
         f"出来高陰線翌日確認: {params.get('volume_confirm_next_day')} / 最低保有中損切り: {params.get('min_hold_stop_loss_exception')} / "
         f"Raw Score最低: {params.get('raw_entry_score_min')} / スコア悪化売却: {params.get('use_score_exit')} / MA割れ売却: {params.get('use_ma_break_exit')} / "
+        f"早期警戒売却: {params.get('use_early_warning_exit')} / 高値更新停止売却: {params.get('use_peak_stall_exit')} / 出来高陰線売却: {params.get('use_volume_down_exit')} / "
         f"通常CD: {params.get('cooldown_days_after_exit')}日 / 損切りCD: {params.get('cooldown_days_after_stop')}日 / "
         f"MA: {params.get('ma')} / 対象: {params.get('symbols')}件"
     )
@@ -2468,7 +2606,7 @@ def set_mode(mode: str, symbol: str | None = None):
 
 
 st.sidebar.header("表示メニュー")
-st.sidebar.caption("app version: backtest-early-warning-v5-20260502")
+st.sidebar.caption("app version: backtest-conditions-v4-quality-filter-20260502")
 
 watchlist_files = find_watchlist_files()
 if watchlist_files:
