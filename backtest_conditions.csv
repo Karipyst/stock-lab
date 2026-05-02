@@ -1,0 +1,46 @@
+﻿condition_name,key,value,type,label
+next_score_exit_off_ma_on_cd20,period_value,5y,str,検証期間
+next_score_exit_off_ma_on_cd20,entry_score,11,int,買いシグナルの最低スコア
+next_score_exit_off_ma_on_cd20,max_hold_days,250,int,最大保有営業日数
+next_score_exit_off_ma_on_cd20,no_overlap,True,bool,同一銘柄の重複保有をしない
+next_score_exit_off_ma_on_cd20,exit_rule,早期警戒付き複合,str,売却ルール
+next_score_exit_off_ma_on_cd20,exit_score,3,int,売却スコア閾値
+next_score_exit_off_ma_on_cd20,trailing_stop_pct,12.0,float,トレーリング損切り%
+next_score_exit_off_ma_on_cd20,stop_loss_pct,12.0,float,固定損切り%
+next_score_exit_off_ma_on_cd20,take_profit_pct,0.0,float,固定利確%
+next_score_exit_off_ma_on_cd20,min_hold_days,14,int,最低保有営業日数
+next_score_exit_off_ma_on_cd20,ma_break_confirm_days,2,int,MA割れ確認日数
+next_score_exit_off_ma_on_cd20,ma_break_buffer_pct,2.0,float,MA割れ許容幅%
+next_score_exit_off_ma_on_cd20,emergency_stop_pct,18.0,float,緊急損切り%
+next_score_exit_off_ma_on_cd20,score_exit_confirm_days,3,int,スコア悪化確認日数
+next_score_exit_off_ma_on_cd20,warning_score,6,int,早期警戒スコア
+next_score_exit_off_ma_on_cd20,score_drop_points,5,int,買い時からのスコア低下pt
+next_score_exit_off_ma_on_cd20,peak_stall_days,15,int,高値更新停止日数
+next_score_exit_off_ma_on_cd20,peak_pullback_pct,6.0,float,高値更新停止時の押し目%
+next_score_exit_off_ma_on_cd20,momentum_confirm_days,4,int,モメンタム悪化確認日数
+next_score_exit_off_ma_on_cd20,volume_drop_pct,3.0,float,出来高急増陰線の下落率%
+next_score_exit_off_ma_on_cd20,volume_spike_ratio,1.8,float,出来高急増倍率
+next_score_exit_off_ma_on_cd20,bt_ma_short,5,int,短期MA
+next_score_exit_off_ma_on_cd20,bt_ma_mid,25,int,中期MA
+next_score_exit_off_ma_on_cd20,bt_ma_long,75,int,長期MA
+next_score_exit_off_ma_on_cd20,use_tiered_trailing,True,bool,含み益別トレーリングを使う
+next_score_exit_off_ma_on_cd20,buy_filter_ma_deviation_pct,15.0,float,買い除外: MA乖離率上限%
+next_score_exit_off_ma_on_cd20,buy_filter_return_5d_pct,10.0,float,買い除外: 5日上昇率上限%
+next_score_exit_off_ma_on_cd20,min_hold_stop_loss_exception,True,bool,最低保有中も通常損切りを許可
+next_score_exit_off_ma_on_cd20,tier1_profit_pct,8.0,float,段階1: 最大含み益%
+next_score_exit_off_ma_on_cd20,tier1_trailing_pct,6.0,float,段階1: 高値から-%
+next_score_exit_off_ma_on_cd20,tier2_profit_pct,15.0,float,段階2: 最大含み益%
+next_score_exit_off_ma_on_cd20,tier2_trailing_pct,8.0,float,段階2: 高値から-%
+next_score_exit_off_ma_on_cd20,tier3_profit_pct,30.0,float,段階3: 最大含み益%
+next_score_exit_off_ma_on_cd20,tier3_trailing_pct,10.0,float,段階3: 高値から-%
+next_score_exit_off_ma_on_cd20,tier4_profit_pct,50.0,float,段階4: 最大含み益%
+next_score_exit_off_ma_on_cd20,tier4_trailing_pct,12.0,float,段階4: 高値から-%
+next_score_exit_off_ma_on_cd20,peak_score_drop_points,4,int,ピークScoreからの低下pt
+next_score_exit_off_ma_on_cd20,peak_score_profit_pct,5.0,float,ピークScore売却の最低含み益%
+next_score_exit_off_ma_on_cd20,volume_confirm_next_day,True,bool,出来高急増陰線は翌日安値割れ確認
+next_score_exit_off_ma_on_cd20,raw_entry_score_min,0,int,内部Raw Score最低値
+next_score_exit_off_ma_on_cd20,use_score_exit,False,bool,スコア悪化売却を使う
+next_score_exit_off_ma_on_cd20,use_ma_break_exit,True,bool,MA25割れ売却を使う
+next_score_exit_off_ma_on_cd20,cooldown_days_after_exit,0,int,通常売却後クールダウン日数
+next_score_exit_off_ma_on_cd20,cooldown_days_after_stop,20,int,損切り後クールダウン日数
+next_score_exit_off_ma_on_cd20,max_symbols,先頭100件,str,検証対象数

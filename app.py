@@ -20,6 +20,211 @@ WATCHLIST_PATH = Path("watchlist.csv")
 HISTORY_PATH = Path("score_history.csv")
 
 
+BACKTEST_CONDITIONS_PATH = Path("backtest_conditions.csv")
+
+BACKTEST_CONDITION_SPECS = {
+    "condition_name": {"type": "str", "default": "next_score_exit_off_ma_on_cd20", "label": "条件名"},
+    "period_value": {"type": "str", "default": "5y", "label": "検証期間"},
+    "entry_score": {"type": "int", "default": 11, "label": "買いシグナルの最低スコア"},
+    "max_hold_days": {"type": "int", "default": 250, "label": "最大保有営業日数"},
+    "no_overlap": {"type": "bool", "default": True, "label": "同一銘柄の重複保有をしない"},
+    "exit_rule": {"type": "str", "default": "早期警戒付き複合", "label": "売却ルール"},
+    "exit_score": {"type": "int", "default": 3, "label": "売却スコア閾値"},
+    "trailing_stop_pct": {"type": "float", "default": 12.0, "label": "トレーリング損切り%"},
+    "stop_loss_pct": {"type": "float", "default": 12.0, "label": "固定損切り%"},
+    "take_profit_pct": {"type": "float", "default": 0.0, "label": "固定利確%"},
+    "min_hold_days": {"type": "int", "default": 14, "label": "最低保有営業日数"},
+    "ma_break_confirm_days": {"type": "int", "default": 2, "label": "MA割れ確認日数"},
+    "ma_break_buffer_pct": {"type": "float", "default": 2.0, "label": "MA割れ許容幅%"},
+    "emergency_stop_pct": {"type": "float", "default": 18.0, "label": "緊急損切り%"},
+    "score_exit_confirm_days": {"type": "int", "default": 3, "label": "スコア悪化確認日数"},
+    "warning_score": {"type": "int", "default": 6, "label": "早期警戒スコア"},
+    "score_drop_points": {"type": "int", "default": 5, "label": "買い時からのスコア低下pt"},
+    "peak_stall_days": {"type": "int", "default": 15, "label": "高値更新停止日数"},
+    "peak_pullback_pct": {"type": "float", "default": 6.0, "label": "高値更新停止時の押し目%"},
+    "momentum_confirm_days": {"type": "int", "default": 4, "label": "モメンタム悪化確認日数"},
+    "volume_drop_pct": {"type": "float", "default": 3.0, "label": "出来高急増陰線の下落率%"},
+    "volume_spike_ratio": {"type": "float", "default": 1.8, "label": "出来高急増倍率"},
+    "bt_ma_short": {"type": "int", "default": 5, "label": "短期MA"},
+    "bt_ma_mid": {"type": "int", "default": 25, "label": "中期MA"},
+    "bt_ma_long": {"type": "int", "default": 75, "label": "長期MA"},
+    "use_tiered_trailing": {"type": "bool", "default": True, "label": "含み益別トレーリングを使う"},
+    "buy_filter_ma_deviation_pct": {"type": "float", "default": 15.0, "label": "買い除外: MA乖離率上限%"},
+    "buy_filter_return_5d_pct": {"type": "float", "default": 10.0, "label": "買い除外: 5日上昇率上限%"},
+    "min_hold_stop_loss_exception": {"type": "bool", "default": True, "label": "最低保有中も通常損切りを許可"},
+    "tier1_profit_pct": {"type": "float", "default": 8.0, "label": "段階1: 最大含み益%"},
+    "tier1_trailing_pct": {"type": "float", "default": 6.0, "label": "段階1: 高値から-%"},
+    "tier2_profit_pct": {"type": "float", "default": 15.0, "label": "段階2: 最大含み益%"},
+    "tier2_trailing_pct": {"type": "float", "default": 8.0, "label": "段階2: 高値から-%"},
+    "tier3_profit_pct": {"type": "float", "default": 30.0, "label": "段階3: 最大含み益%"},
+    "tier3_trailing_pct": {"type": "float", "default": 10.0, "label": "段階3: 高値から-%"},
+    "tier4_profit_pct": {"type": "float", "default": 50.0, "label": "段階4: 最大含み益%"},
+    "tier4_trailing_pct": {"type": "float", "default": 12.0, "label": "段階4: 高値から-%"},
+    "peak_score_drop_points": {"type": "int", "default": 4, "label": "ピークScoreからの低下pt"},
+    "peak_score_profit_pct": {"type": "float", "default": 5.0, "label": "ピークScore売却の最低含み益%"},
+    "volume_confirm_next_day": {"type": "bool", "default": True, "label": "出来高急増陰線は翌日安値割れ確認"},
+    "raw_entry_score_min": {"type": "int", "default": 0, "label": "内部Raw Score最低値"},
+    "use_score_exit": {"type": "bool", "default": False, "label": "スコア悪化売却を使う"},
+    "use_ma_break_exit": {"type": "bool", "default": True, "label": "MA25割れ売却を使う"},
+    "cooldown_days_after_exit": {"type": "int", "default": 0, "label": "通常売却後クールダウン日数"},
+    "cooldown_days_after_stop": {"type": "int", "default": 20, "label": "損切り後クールダウン日数"},
+    "max_symbols": {"type": "str", "default": "先頭100件", "label": "検証対象数"},
+}
+
+
+def default_backtest_conditions() -> dict:
+    return {key: spec["default"] for key, spec in BACKTEST_CONDITION_SPECS.items()}
+
+
+def parse_backtest_condition_value(key: str, value):
+    spec = BACKTEST_CONDITION_SPECS.get(key, {"type": "str", "default": value})
+    if pd.isna(value):
+        return spec.get("default")
+    t = spec.get("type", "str")
+    if t == "bool":
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() in {"true", "1", "yes", "y", "on", "有効", "はい"}
+    if t == "int":
+        try:
+            return int(float(value))
+        except Exception:
+            return int(spec.get("default", 0))
+    if t == "float":
+        try:
+            return float(value)
+        except Exception:
+            return float(spec.get("default", 0.0))
+    return str(value)
+
+
+def backtest_conditions_to_long_df(conditions: dict, condition_name: str | None = None) -> pd.DataFrame:
+    profile = condition_name or str(conditions.get("condition_name", "backtest_condition"))
+    rows = []
+    for key, spec in BACKTEST_CONDITION_SPECS.items():
+        if key == "condition_name":
+            continue
+        rows.append({
+            "condition_name": profile,
+            "key": key,
+            "value": conditions.get(key, spec["default"]),
+            "type": spec["type"],
+            "label": spec["label"],
+        })
+    return pd.DataFrame(rows)
+
+
+def backtest_conditions_csv_bytes(conditions: dict, condition_name: str | None = None) -> bytes:
+    return backtest_conditions_to_long_df(conditions, condition_name).to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+
+
+def read_backtest_condition_profiles(source) -> dict[str, dict]:
+    """条件CSVを読み込み、{条件名: 条件dict} に変換する。long形式と1行wide形式の両方に対応。"""
+    try:
+        df = pd.read_csv(source, encoding="utf-8-sig")
+    except Exception:
+        try:
+            df = pd.read_csv(source)
+        except Exception:
+            return {}
+    if df.empty:
+        return {}
+    df.columns = [str(c).replace("\ufeff", "").strip() for c in df.columns]
+    profiles: dict[str, dict] = {}
+
+    # 推奨: long形式 condition_name,key,value
+    if {"condition_name", "key", "value"}.issubset(df.columns):
+        for profile_name, one in df.groupby("condition_name", dropna=False):
+            name = str(profile_name) if str(profile_name) != "nan" else "loaded_condition"
+            cond = default_backtest_conditions()
+            cond["condition_name"] = name
+            for _, row in one.iterrows():
+                key = str(row["key"]).strip()
+                if key in BACKTEST_CONDITION_SPECS:
+                    cond[key] = parse_backtest_condition_value(key, row["value"])
+            profiles[name] = cond
+        return profiles
+
+    # 互換: 1行=1条件のwide形式
+    for idx, row in df.iterrows():
+        name = str(row.get("condition_name", f"condition_{idx + 1}"))
+        cond = default_backtest_conditions()
+        cond["condition_name"] = name
+        for key in BACKTEST_CONDITION_SPECS.keys():
+            if key in df.columns:
+                cond[key] = parse_backtest_condition_value(key, row[key])
+        profiles[name] = cond
+    return profiles
+
+
+def get_backtest_condition_value(conditions: dict, key: str):
+    return conditions.get(key, BACKTEST_CONDITION_SPECS[key]["default"])
+
+
+def selectbox_index(options: list, value, fallback: int = 0) -> int:
+    try:
+        return options.index(value)
+    except ValueError:
+        return fallback
+
+
+def render_backtest_condition_loader() -> dict:
+    """バックテスト条件の読み込みUIを表示し、現在の初期値dictを返す。"""
+    builtin_name = "next_score_exit_off_ma_on_cd20"
+    profiles = {builtin_name: default_backtest_conditions()}
+    profiles[builtin_name]["condition_name"] = builtin_name
+
+    if BACKTEST_CONDITIONS_PATH.exists():
+        profiles.update(read_backtest_condition_profiles(BACKTEST_CONDITIONS_PATH))
+
+    loaded = st.session_state.get("loaded_backtest_conditions")
+    if not isinstance(loaded, dict):
+        loaded = profiles.get(builtin_name, default_backtest_conditions())
+        st.session_state["loaded_backtest_conditions"] = loaded
+
+    with st.container():
+        st.markdown("#### 条件の読み込み・保存")
+        l1, l2, l3 = st.columns([2, 1, 1])
+        with l1:
+            profile_names = list(profiles.keys())
+            selected_profile = st.selectbox(
+                "保存済み条件",
+                profile_names,
+                index=selectbox_index(profile_names, str(loaded.get("condition_name", builtin_name))),
+                help="リポジトリ直下の backtest_conditions.csv があれば自動で候補に出ます。",
+            )
+        with l2:
+            if st.button("選択条件を読み込む"):
+                st.session_state["loaded_backtest_conditions"] = profiles[selected_profile]
+                st.rerun()
+        with l3:
+            st.download_button(
+                "初期条件CSV",
+                data=backtest_conditions_csv_bytes(profiles[builtin_name], builtin_name),
+                file_name="backtest_conditions.csv",
+                mime="text/csv",
+            )
+
+        uploaded = st.file_uploader("条件CSVをアップロードして読み込む", type=["csv"], key="backtest_condition_uploader")
+        if uploaded is not None:
+            uploaded_profiles = read_backtest_condition_profiles(uploaded)
+            if uploaded_profiles:
+                u1, u2 = st.columns([2, 1])
+                with u1:
+                    upload_name = st.selectbox("アップロードCSV内の条件", list(uploaded_profiles.keys()))
+                with u2:
+                    if st.button("アップロード条件を読み込む"):
+                        st.session_state["loaded_backtest_conditions"] = uploaded_profiles[upload_name]
+                        st.rerun()
+            else:
+                st.warning("条件CSVを読み込めませんでした。condition_name,key,value の列を持つCSVを使ってください。")
+
+        active = st.session_state.get("loaded_backtest_conditions", loaded)
+        st.caption(f"現在の初期条件: {active.get('condition_name', builtin_name)}")
+    return active
+
+
+
 def get_app_password() -> str:
     """Streamlit Secrets からアプリ用パスワードを取得する。"""
     try:
@@ -676,6 +881,142 @@ def add_indicators(
     return df
 
 
+def build_score_result_from_rows(latest: pd.Series, prev: pd.Series, labels: dict, include_reasons: bool = False, ma_mid: int | None = None, ma_short: int | None = None, ma_long: int | None = None) -> dict:
+    """買いスコアを共通計算する。
+
+    score は従来どおり 0〜12 に丸める。raw_score は丸め前の内部点数。
+    raw_score/component をCSVに出すことで、Score 12の中身を検証できるようにする。
+    """
+    raw_score = 0
+    reasons: list[str] = []
+
+    close = latest["Close"]
+    ma_s = latest[labels["short"]]
+    ma_m = latest[labels["mid"]]
+    ma_l = latest[labels["long"]]
+    rsi = latest["RSI"]
+    macd_diff = latest["MACD_DIFF"]
+    prev_macd_diff = prev["MACD_DIFF"]
+    volume_ratio = latest["Volume_Ratio"]
+    return_5d = latest["Return_5d"]
+    return_20d = latest["Return_20d"]
+
+    close_gt_ma_mid = bool(close > ma_m)
+    ma_short_gt_mid = bool(ma_s > ma_m)
+    ma_mid_gt_long = bool(ma_m > ma_l)
+    rsi_good = bool(40 <= rsi <= 65)
+    rsi_overheat = bool(rsi > 75)
+    rsi_oversold = bool(rsi < 30)
+    macd_positive = bool(macd_diff > 0)
+    macd_cross_up = bool(prev_macd_diff < 0 and macd_diff > 0)
+    volume_15x = bool(volume_ratio >= 1.5)
+    volume_12x = bool((volume_ratio >= 1.2) and not volume_15x)
+    return_5d_positive = bool(return_5d > 0)
+    return_20d_positive = bool(return_20d > 0)
+
+    if close_gt_ma_mid:
+        raw_score += 2
+        if include_reasons:
+            reasons.append(f"終値が{ma_mid}日移動平均線を上回っており、中期的には上向きです。")
+    elif include_reasons:
+        reasons.append(f"終値が{ma_mid}日移動平均線を下回っており、中期的には弱めです。")
+
+    if ma_short_gt_mid:
+        raw_score += 2
+        if include_reasons:
+            reasons.append(f"{ma_short}日移動平均線が{ma_mid}日移動平均線を上回っており、短期トレンドが改善しています。")
+
+    if ma_mid_gt_long:
+        raw_score += 2
+        if include_reasons:
+            reasons.append(f"{ma_mid}日移動平均線が{ma_long}日移動平均線を上回っており、上昇基調が確認できます。")
+
+    if rsi_good:
+        raw_score += 2
+        if include_reasons:
+            reasons.append("RSIが40〜65の範囲で、過熱しすぎていない上昇余地のある水準です。")
+    elif rsi_overheat:
+        raw_score -= 2
+        if include_reasons:
+            reasons.append("RSIが75を超えており、短期的には買われすぎの可能性があります。")
+    elif rsi_oversold:
+        raw_score += 1
+        if include_reasons:
+            reasons.append("RSIが30未満で売られすぎ水準です。ただし下落中の可能性もあります。")
+
+    if macd_positive:
+        raw_score += 2
+        if include_reasons:
+            reasons.append("MACDがシグナルを上回っており、上昇モメンタムがあります。")
+
+    if macd_cross_up:
+        raw_score += 2
+        if include_reasons:
+            reasons.append("MACDが直近で陽転しており、買い転換の候補です。")
+
+    if volume_15x:
+        raw_score += 2
+        if include_reasons:
+            reasons.append("出来高が20日平均の1.5倍以上で、注目度が高まっています。")
+    elif volume_12x:
+        raw_score += 1
+        if include_reasons:
+            reasons.append("出来高が20日平均をやや上回っています。")
+
+    if return_5d_positive:
+        raw_score += 1
+        if include_reasons:
+            reasons.append("直近5営業日のリターンがプラスです。")
+
+    if return_20d_positive:
+        raw_score += 1
+        if include_reasons:
+            reasons.append("直近20営業日のリターンがプラスです。")
+
+    score = max(0, min(int(raw_score), 12))
+
+    if score >= 9:
+        status = "強い買い候補"
+    elif score >= 6:
+        status = "買い候補"
+    elif score >= 3:
+        status = "様子見"
+    else:
+        status = "弱い / 見送り"
+
+    ma_deviation_pct = None
+    try:
+        ma_deviation_pct = (float(close) / float(ma_m) - 1) * 100 if float(ma_m) > 0 else None
+    except Exception:
+        ma_deviation_pct = None
+
+    return {
+        "score": score,
+        "raw_score": int(raw_score),
+        "status": status,
+        "reasons": reasons,
+        "latest": latest,
+        "signal_close": float(close),
+        "signal_rsi": float(rsi),
+        "signal_volume_ratio": float(volume_ratio),
+        "signal_return_5d": float(return_5d),
+        "signal_return_20d": float(return_20d),
+        "signal_ma_deviation_pct": ma_deviation_pct,
+        "score_close_gt_ma_mid": close_gt_ma_mid,
+        "score_ma_short_gt_mid": ma_short_gt_mid,
+        "score_ma_mid_gt_long": ma_mid_gt_long,
+        "score_rsi_good": rsi_good,
+        "score_rsi_overheat": rsi_overheat,
+        "score_rsi_oversold": rsi_oversold,
+        "score_macd_positive": macd_positive,
+        "score_macd_cross_up": macd_cross_up,
+        "score_volume_15x": volume_15x,
+        "score_volume_12x": volume_12x,
+        "score_return_5d_positive": return_5d_positive,
+        "score_return_20d_positive": return_20d_positive,
+    }
+
+
 def calculate_buy_score(
     df: pd.DataFrame,
     ma_short: int,
@@ -707,84 +1048,16 @@ def calculate_buy_score(
     latest = clean.iloc[-1]
     prev = clean.iloc[-2]
 
-    score = 0
-    reasons = []
-
-    close = latest["Close"]
-    ma_s = latest[labels["short"]]
-    ma_m = latest[labels["mid"]]
-    ma_l = latest[labels["long"]]
-    rsi = latest["RSI"]
-    macd_diff = latest["MACD_DIFF"]
-    prev_macd_diff = prev["MACD_DIFF"]
-    volume_ratio = latest["Volume_Ratio"]
-    return_5d = latest["Return_5d"]
-    return_20d = latest["Return_20d"]
-
-    if close > ma_m:
-        score += 2
-        reasons.append(f"終値が{ma_mid}日移動平均線を上回っており、中期的には上向きです。")
-    else:
-        reasons.append(f"終値が{ma_mid}日移動平均線を下回っており、中期的には弱めです。")
-
-    if ma_s > ma_m:
-        score += 2
-        reasons.append(f"{ma_short}日移動平均線が{ma_mid}日移動平均線を上回っており、短期トレンドが改善しています。")
-
-    if ma_m > ma_l:
-        score += 2
-        reasons.append(f"{ma_mid}日移動平均線が{ma_long}日移動平均線を上回っており、上昇基調が確認できます。")
-
-    if 40 <= rsi <= 65:
-        score += 2
-        reasons.append("RSIが40〜65の範囲で、過熱しすぎていない上昇余地のある水準です。")
-    elif rsi > 75:
-        score -= 2
-        reasons.append("RSIが75を超えており、短期的には買われすぎの可能性があります。")
-    elif rsi < 30:
-        score += 1
-        reasons.append("RSIが30未満で売られすぎ水準です。ただし下落中の可能性もあります。")
-
-    if macd_diff > 0:
-        score += 2
-        reasons.append("MACDがシグナルを上回っており、上昇モメンタムがあります。")
-
-    if prev_macd_diff < 0 and macd_diff > 0:
-        score += 2
-        reasons.append("MACDが直近で陽転しており、買い転換の候補です。")
-
-    if volume_ratio >= 1.5:
-        score += 2
-        reasons.append("出来高が20日平均の1.5倍以上で、注目度が高まっています。")
-    elif volume_ratio >= 1.2:
-        score += 1
-        reasons.append("出来高が20日平均をやや上回っています。")
-
-    if return_5d > 0:
-        score += 1
-        reasons.append("直近5営業日のリターンがプラスです。")
-
-    if return_20d > 0:
-        score += 1
-        reasons.append("直近20営業日のリターンがプラスです。")
-
-    score = max(0, min(score, 12))
-
-    if score >= 9:
-        status = "強い買い候補"
-    elif score >= 6:
-        status = "買い候補"
-    elif score >= 3:
-        status = "様子見"
-    else:
-        status = "弱い / 見送り"
-
-    return {
-        "score": score,
-        "status": status,
-        "reasons": reasons,
-        "latest": latest,
-    }
+    result = build_score_result_from_rows(
+        latest,
+        prev,
+        labels,
+        include_reasons=True,
+        ma_mid=ma_mid,
+        ma_short=ma_short,
+        ma_long=ma_long,
+    )
+    return result
 
 
 def analyze_symbol(
@@ -890,70 +1163,9 @@ def calculate_buy_score_at(
     if latest[required].isna().any() or pd.isna(prev["MACD_DIFF"]):
         return {"score": 0, "status": "データ不足"}
 
-    score = 0
-    close = latest["Close"]
-    ma_s = latest[labels["short"]]
-    ma_m = latest[labels["mid"]]
-    ma_l = latest[labels["long"]]
-    rsi = latest["RSI"]
-    macd_diff = latest["MACD_DIFF"]
-    prev_macd_diff = prev["MACD_DIFF"]
-    volume_ratio = latest["Volume_Ratio"]
-    return_5d = latest["Return_5d"]
-    return_20d = latest["Return_20d"]
+    result = build_score_result_from_rows(latest, prev, labels, include_reasons=False)
+    return result
 
-    if close > ma_m:
-        score += 2
-    if ma_s > ma_m:
-        score += 2
-    if ma_m > ma_l:
-        score += 2
-    if 40 <= rsi <= 65:
-        score += 2
-    elif rsi > 75:
-        score -= 2
-    elif rsi < 30:
-        score += 1
-    if macd_diff > 0:
-        score += 2
-    if prev_macd_diff < 0 and macd_diff > 0:
-        score += 2
-    if volume_ratio >= 1.5:
-        score += 2
-    elif volume_ratio >= 1.2:
-        score += 1
-    if return_5d > 0:
-        score += 1
-    if return_20d > 0:
-        score += 1
-
-    score = max(0, min(int(score), 12))
-    if score >= 9:
-        status = "強い買い候補"
-    elif score >= 6:
-        status = "買い候補"
-    elif score >= 3:
-        status = "様子見"
-    else:
-        status = "弱い / 見送り"
-    return {"score": score, "status": status}
-
-
-def is_strictly_decreasing(values: list[float]) -> bool:
-    """リストが連続して低下しているかを判定する。"""
-    if len(values) < 2:
-        return False
-    return all(values[i] < values[i - 1] for i in range(1, len(values)))
-
-
-def pct_change(current: float, base: float) -> float:
-    """baseからcurrentへの変化率を%で返す。"""
-    if base == 0 or pd.isna(base) or pd.isna(current):
-        return 0.0
-    return (current / base - 1) * 100
-
-
-@st.cache_data(ttl=1800)
 def run_symbol_backtest_cached(
     symbol: str,
     name: str,
@@ -998,6 +1210,11 @@ def run_symbol_backtest_cached(
     peak_score_profit_pct: float,
     volume_confirm_next_day: bool,
     min_hold_stop_loss_exception: bool,
+    raw_entry_score_min: int,
+    use_score_exit: bool,
+    use_ma_break_exit: bool,
+    cooldown_days_after_exit: int,
+    cooldown_days_after_stop: int,
     analysis_name: str = "",
 ) -> tuple[pd.DataFrame, dict]:
     """1銘柄分のバックテストを実行する。"""
@@ -1162,11 +1379,11 @@ def run_symbol_backtest_cached(
                 return f"最低保有中の損切り-{float(stop_loss_pct):.1f}%"
             return None
 
-        if exit_rule in ["スコア悪化", "複合", "早期警戒付き複合"]:
+        if bool(use_score_exit) and exit_rule in ["スコア悪化", "複合", "早期警戒付き複合"]:
             if is_confirmed_score_exit(j, entry_signal_score):
                 reasons.append(f"スコア悪化<= {exit_score} または買い時から-{int(score_drop_points)}pt / {int(score_exit_confirm_days)}日確認")
 
-        if exit_rule in ["トレンド崩れ", "複合", "早期警戒付き複合"]:
+        if bool(use_ma_break_exit) and exit_rule in ["トレンド崩れ", "複合", "早期警戒付き複合"]:
             row = df.iloc[j]
             if not row[trend_required].isna().any():
                 ma_short_now = float(row[labels["short"]])
@@ -1219,6 +1436,9 @@ def run_symbol_backtest_cached(
         if signal["score"] < entry_score:
             i += 1
             continue
+        if int(raw_entry_score_min) > 0 and int(signal.get("raw_score", signal["score"])) < int(raw_entry_score_min):
+            i += 1
+            continue
 
         signal_row = df.iloc[i]
         # 短期急騰・中期MAからの過熱乖離は、天井掴みを避けるため買い除外できる。
@@ -1247,7 +1467,8 @@ def run_symbol_backtest_cached(
             break
 
         exit_idx = exit_limit
-        exit_reason = "最大保有日数"
+        # データ末尾に到達しただけの未決済クローズと、最大保有日数到達を分ける。
+        exit_reason = "検証期間終了" if exit_limit < entry_idx + int(max_hold_days) else "最大保有日数"
         highest_close = float(df.iloc[entry_idx]["Close"])
         peak_score = int(signal["score"])
 
@@ -1304,13 +1525,35 @@ def run_symbol_backtest_cached(
                 "hold_days": realized_hold_days,
                 "exit_reason": exit_reason,
                 "score": signal["score"],
+                "raw_score": signal.get("raw_score", signal["score"]),
                 "status": signal["status"],
+                "signal_rsi": signal.get("signal_rsi"),
+                "signal_volume_ratio": signal.get("signal_volume_ratio"),
+                "signal_return_5d": signal.get("signal_return_5d"),
+                "signal_return_20d": signal.get("signal_return_20d"),
+                "signal_ma_deviation_pct": signal.get("signal_ma_deviation_pct"),
+                "score_close_gt_ma_mid": signal.get("score_close_gt_ma_mid"),
+                "score_ma_short_gt_mid": signal.get("score_ma_short_gt_mid"),
+                "score_ma_mid_gt_long": signal.get("score_ma_mid_gt_long"),
+                "score_rsi_good": signal.get("score_rsi_good"),
+                "score_rsi_overheat": signal.get("score_rsi_overheat"),
+                "score_rsi_oversold": signal.get("score_rsi_oversold"),
+                "score_macd_positive": signal.get("score_macd_positive"),
+                "score_macd_cross_up": signal.get("score_macd_cross_up"),
+                "score_volume_15x": signal.get("score_volume_15x"),
+                "score_volume_12x": signal.get("score_volume_12x"),
+                "score_return_5d_positive": signal.get("score_return_5d_positive"),
+                "score_return_20d_positive": signal.get("score_return_20d_positive"),
                 "return_pct": return_pct,
                 "max_profit_pct": (highest_close / entry_price - 1) * 100 if entry_price > 0 else 0.0,
                 "win": return_pct > 0,
             })
 
-        i = exit_idx if no_overlap else i + 1
+        if no_overlap:
+            cooldown = int(cooldown_days_after_stop) if ("損切り" in str(exit_reason) or "緊急損切り" in str(exit_reason)) else int(cooldown_days_after_exit)
+            i = exit_idx + max(0, cooldown)
+        else:
+            i = i + 1
 
     trades_df = pd.DataFrame(trades)
     if not trades_df.empty:
@@ -1366,38 +1609,42 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
         "売却は単発のMA割れではなく、最低保有日数・連続MA割れ・許容幅でノイズを抑え、さらに高値更新停止・短期モメンタム悪化・出来高急増陰線で早期警戒できます。"
     )
 
+    condition_values = render_backtest_condition_loader()
+    cv = lambda key: get_backtest_condition_value(condition_values, key)
+
     with st.expander("バックテスト条件", expanded=True):
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            period_value = st.selectbox("検証期間", ["1y", "2y", "5y", "10y"], index=2)
+            period_options = ["1y", "2y", "5y", "10y"]
+            period_value = st.selectbox("検証期間", period_options, index=selectbox_index(period_options, cv("period_value"), 2))
         with c2:
-            entry_score = st.slider("買いシグナルの最低スコア", 3, 12, 11, 1)
+            entry_score = st.slider("買いシグナルの最低スコア", 3, 12, int(cv("entry_score")), 1)
         with c3:
             max_hold_days = st.slider(
                 "最大保有営業日数",
                 min_value=5,
                 max_value=1250,
-                value=250,
+                value=int(cv("max_hold_days")),
                 step=5,
                 help="約250営業日=約1年、約1250営業日=約5年です。売却条件に該当しない場合の最終期限として使います。",
             )
         with c4:
-            no_overlap = st.checkbox("同一銘柄の重複保有をしない", value=True)
+            no_overlap = st.checkbox("同一銘柄の重複保有をしない", value=bool(cv("no_overlap")))
 
         e1, e2, e3, e4 = st.columns(4)
         with e1:
             exit_rule = st.selectbox(
                 "売却ルール",
                 ["早期警戒付き複合", "複合", "スコア悪化", "トレンド崩れ", "トレーリングストップ", "利確/損切り", "最大保有日数のみ"],
-                index=0,
+                index=selectbox_index(["早期警戒付き複合", "複合", "スコア悪化", "トレンド崩れ", "トレーリングストップ", "利確/損切り", "最大保有日数のみ"], cv("exit_rule"), 0),
                 help="おすすめは『早期警戒付き複合』です。トレンド崩れを待つだけでなく、高値更新停止・短期モメンタム悪化・出来高急増陰線も見ます。",
             )
         with e2:
-            exit_score = st.slider("売却スコア閾値", 0, 8, 3, 1, help="スコアがこの値以下になったら売却候補にします。")
+            exit_score = st.slider("売却スコア閾値", 0, 8, int(cv("exit_score")), 1, help="スコアがこの値以下になったら売却候補にします。")
         with e3:
-            trailing_stop_pct = st.slider("トレーリング損切り%", 1.0, 40.0, 12.0, 0.5)
+            trailing_stop_pct = st.slider("トレーリング損切り%", 1.0, 40.0, float(cv("trailing_stop_pct")), 0.5)
         with e4:
-            stop_loss_pct = st.slider("固定損切り%", 0.0, 40.0, 10.0, 0.5, help="0%にすると無効です。")
+            stop_loss_pct = st.slider("固定損切り%", 0.0, 40.0, float(cv("stop_loss_pct")), 0.5, help="0%にすると無効です。")
 
         n1, n2, n3, n4 = st.columns(4)
         with n1:
@@ -1405,7 +1652,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "最低保有営業日数",
                 min_value=0,
                 max_value=120,
-                value=10,
+                value=int(cv("min_hold_days")),
                 step=1,
                 help="この日数に達するまでは、通常のスコア悪化・MA割れ・トレーリング損切りでは売却しません。買付直後のノイズ対策です。",
             )
@@ -1414,7 +1661,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "MA割れ確認日数",
                 min_value=1,
                 max_value=20,
-                value=2,
+                value=int(cv("ma_break_confirm_days")),
                 step=1,
                 help="終値が中期MAを何営業日連続で下回ったら、MA割れと認定するかです。",
             )
@@ -1423,7 +1670,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "MA割れ許容幅%",
                 min_value=0.0,
                 max_value=10.0,
-                value=2.0,
+                value=float(cv("ma_break_buffer_pct")),
                 step=0.5,
                 help="終値がMAを少し下回っただけでは売らないための余白です。2%なら MA×0.98 未満で割れ判定します。",
             )
@@ -1432,7 +1679,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "緊急損切り%",
                 min_value=0.0,
                 max_value=50.0,
-                value=18.0,
+                value=float(cv("emergency_stop_pct")),
                 step=0.5,
                 help="最低保有期間中でも、この下落率を超えた場合だけ例外的に売却します。0%で無効です。",
             )
@@ -1443,7 +1690,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "スコア悪化確認日数",
                 min_value=1,
                 max_value=10,
-                value=3,
+                value=int(cv("score_exit_confirm_days")),
                 step=1,
                 help="スコア悪化を何営業日連続で確認してから売るかです。単日のスコア低下によるノイズ売却を抑えます。",
             )
@@ -1452,7 +1699,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "早期警戒スコア",
                 min_value=3,
                 max_value=10,
-                value=6,
+                value=int(cv("warning_score")),
                 step=1,
                 help="早期警戒付き複合で使います。スコアがこの値以下になった状態が続くと、上昇力鈍化として売却候補にします。",
             )
@@ -1461,7 +1708,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "買い時からのスコア低下pt",
                 min_value=1,
                 max_value=8,
-                value=5,
+                value=int(cv("score_drop_points")),
                 step=1,
                 help="買いシグナル時点から何点低下したら、絶対スコアに関係なく劣化と見るかです。",
             )
@@ -1470,7 +1717,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "高値更新停止日数",
                 min_value=3,
                 max_value=60,
-                value=15,
+                value=int(cv("peak_stall_days")),
                 step=1,
                 help="この日数だけ終値ベースの高値更新が止まり、かつ高値から指定%以上押した場合に売却候補にします。",
             )
@@ -1481,7 +1728,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "高値更新停止時の押し目%",
                 min_value=1.0,
                 max_value=30.0,
-                value=6.0,
+                value=float(cv("peak_pullback_pct")),
                 step=0.5,
                 help="高値更新停止とセットで使います。高値からこの割合以上下がった場合、上昇力鈍化と見ます。",
             )
@@ -1490,7 +1737,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "モメンタム悪化確認日数",
                 min_value=2,
                 max_value=10,
-                value=4,
+                value=int(cv("momentum_confirm_days")),
                 step=1,
                 help="短期MAとMACD差分が連続悪化し、5日リターンもマイナスの場合に売却候補にします。終値が短期MAを下回ることも必須です。",
             )
@@ -1499,7 +1746,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "出来高急増陰線の下落率%",
                 min_value=0.5,
                 max_value=10.0,
-                value=3.0,
+                value=float(cv("volume_drop_pct")),
                 step=0.5,
                 help="始値から終値までこの割合以上下落し、出来高も増えた陰線を警戒します。",
             )
@@ -1508,27 +1755,27 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "出来高急増倍率",
                 min_value=1.0,
                 max_value=5.0,
-                value=1.8,
+                value=float(cv("volume_spike_ratio")),
                 step=0.1,
                 help="出来高が平均比でこの倍率以上なら、売り圧力が強い下落として扱います。",
             )
 
         p1, p2, p3, p4 = st.columns(4)
         with p1:
-            take_profit_pct = st.slider("固定利確%", 0.0, 200.0, 0.0, 1.0, help="0%にすると無効です。長期トレンド検証では無効推奨です。")
+            take_profit_pct = st.slider("固定利確%", 0.0, 200.0, float(cv("take_profit_pct")), 1.0, help="0%にすると無効です。長期トレンド検証では無効推奨です。")
         with p2:
-            bt_ma_short = st.number_input("短期MA", min_value=1, max_value=100, value=int(st.session_state.get("ma_short", 5)), step=1)
+            bt_ma_short = st.number_input("短期MA", min_value=1, max_value=100, value=int(cv("bt_ma_short")), step=1)
         with p3:
-            bt_ma_mid = st.number_input("中期MA", min_value=2, max_value=250, value=int(st.session_state.get("ma_mid", 25)), step=1)
+            bt_ma_mid = st.number_input("中期MA", min_value=2, max_value=250, value=int(cv("bt_ma_mid")), step=1)
         with p4:
-            bt_ma_long = st.number_input("長期MA", min_value=3, max_value=500, value=int(st.session_state.get("ma_long", 75)), step=1)
+            bt_ma_long = st.number_input("長期MA", min_value=3, max_value=500, value=int(cv("bt_ma_long")), step=1)
 
         st.markdown("#### 改善案テスト用の追加条件")
         q1, q2, q3, q4 = st.columns(4)
         with q1:
             use_tiered_trailing = st.checkbox(
                 "含み益別トレーリングを使う",
-                value=True,
+                value=bool(cv("use_tiered_trailing")),
                 help="最大含み益に応じて、高値からの売却幅を 6%→8%→10%→12% と段階化します。",
             )
         with q2:
@@ -1536,7 +1783,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "買い除外: MA乖離率上限%",
                 min_value=0.0,
                 max_value=60.0,
-                value=25.0,
+                value=float(cv("buy_filter_ma_deviation_pct")),
                 step=1.0,
                 help="シグナル日の終値が中期MAからこの割合以上上に乖離している場合は、短期過熱として買いません。0%で無効です。",
             )
@@ -1545,30 +1792,30 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "買い除外: 5日上昇率上限%",
                 min_value=0.0,
                 max_value=50.0,
-                value=15.0,
+                value=float(cv("buy_filter_return_5d_pct")),
                 step=1.0,
                 help="シグナル日の5日リターンがこの割合以上なら、短期急騰後として買いません。0%で無効です。",
             )
         with q4:
             min_hold_stop_loss_exception = st.checkbox(
                 "最低保有中も通常損切りを許可",
-                value=True,
+                value=bool(cv("min_hold_stop_loss_exception")),
                 help="最低保有期間中でも固定損切りに達した場合は売却します。",
             )
 
         t1, t2, t3, t4 = st.columns(4)
         with t1:
-            tier1_profit_pct = st.number_input("段階1: 最大含み益%", min_value=0.0, max_value=200.0, value=5.0, step=1.0)
-            tier1_trailing_pct = st.number_input("段階1: 高値から-%", min_value=0.0, max_value=60.0, value=6.0, step=0.5)
+            tier1_profit_pct = st.number_input("段階1: 最大含み益%", min_value=0.0, max_value=200.0, value=float(cv("tier1_profit_pct")), step=1.0)
+            tier1_trailing_pct = st.number_input("段階1: 高値から-%", min_value=0.0, max_value=60.0, value=float(cv("tier1_trailing_pct")), step=0.5)
         with t2:
-            tier2_profit_pct = st.number_input("段階2: 最大含み益%", min_value=0.0, max_value=200.0, value=15.0, step=1.0)
-            tier2_trailing_pct = st.number_input("段階2: 高値から-%", min_value=0.0, max_value=60.0, value=8.0, step=0.5)
+            tier2_profit_pct = st.number_input("段階2: 最大含み益%", min_value=0.0, max_value=200.0, value=float(cv("tier2_profit_pct")), step=1.0)
+            tier2_trailing_pct = st.number_input("段階2: 高値から-%", min_value=0.0, max_value=60.0, value=float(cv("tier2_trailing_pct")), step=0.5)
         with t3:
-            tier3_profit_pct = st.number_input("段階3: 最大含み益%", min_value=0.0, max_value=200.0, value=30.0, step=1.0)
-            tier3_trailing_pct = st.number_input("段階3: 高値から-%", min_value=0.0, max_value=60.0, value=10.0, step=0.5)
+            tier3_profit_pct = st.number_input("段階3: 最大含み益%", min_value=0.0, max_value=200.0, value=float(cv("tier3_profit_pct")), step=1.0)
+            tier3_trailing_pct = st.number_input("段階3: 高値から-%", min_value=0.0, max_value=60.0, value=float(cv("tier3_trailing_pct")), step=0.5)
         with t4:
-            tier4_profit_pct = st.number_input("段階4: 最大含み益%", min_value=0.0, max_value=300.0, value=50.0, step=1.0)
-            tier4_trailing_pct = st.number_input("段階4: 高値から-%", min_value=0.0, max_value=60.0, value=12.0, step=0.5)
+            tier4_profit_pct = st.number_input("段階4: 最大含み益%", min_value=0.0, max_value=300.0, value=float(cv("tier4_profit_pct")), step=1.0)
+            tier4_trailing_pct = st.number_input("段階4: 高値から-%", min_value=0.0, max_value=60.0, value=float(cv("tier4_trailing_pct")), step=0.5)
 
         u1, u2, u3, u4 = st.columns(4)
         with u1:
@@ -1576,7 +1823,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "ピークScoreからの低下pt",
                 min_value=0,
                 max_value=8,
-                value=4,
+                value=int(cv("peak_score_drop_points")),
                 step=1,
                 help="保有中の最大Scoreからこの点数以上低下し、含み益条件と終値<短期MAを満たしたら売却候補にします。0で無効です。",
             )
@@ -1585,24 +1832,137 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 "ピークScore売却の最低含み益%",
                 min_value=0.0,
                 max_value=50.0,
-                value=5.0,
+                value=float(cv("peak_score_profit_pct")),
                 step=0.5,
                 help="ピークScore悪化売却を有効にする最低含み益です。",
             )
         with u3:
             volume_confirm_next_day = st.checkbox(
                 "出来高急増陰線は翌日安値割れ確認",
-                value=True,
+                value=bool(cv("volume_confirm_next_day")),
                 help="当日の大陰線だけでは売らず、翌日に前日安値を終値で割った場合に売ります。",
             )
         with u4:
-            st.caption("推奨初期値：買いScore 11以上 / 最低保有10日 / MA割れ2日 / スコア悪化3日 / モメンタム4日＋終値<MA5 / 含み益別トレーリング / 過熱買い除外。")
+            st.caption("推奨初期値：買いScore 11以上 / 最低保有14日 / スコア悪化売却OFF / MA割れON / 損切り後CD20日 / 過熱買い除外。")
+
+        v1, v2, v3, v4 = st.columns(4)
+        with v1:
+            raw_entry_score_min = st.slider(
+                "内部Raw Score最低値",
+                min_value=0,
+                max_value=18,
+                value=int(cv("raw_entry_score_min")),
+                step=1,
+                help="0で無効です。通常Scoreは最大12で丸められるため、丸め前の内部点数でも買いを絞り込めるようにします。",
+            )
+        with v2:
+            use_score_exit = st.checkbox(
+                "スコア悪化売却を使う",
+                value=bool(cv("use_score_exit")),
+                help="OFFにすると、複合ルール内のスコア悪化単独売却を無効化します。短期モメンタムやトレーリングは残ります。",
+            )
+        with v3:
+            use_ma_break_exit = st.checkbox(
+                "MA25割れ売却を使う",
+                value=bool(cv("use_ma_break_exit")),
+                help="OFFにすると、複合ルール内の中期MA割れ売却を無効化します。",
+            )
+        with v4:
+            cooldown_days_after_exit = st.slider(
+                "通常売却後クールダウン日数",
+                min_value=0,
+                max_value=60,
+                value=int(cv("cooldown_days_after_exit")),
+                step=1,
+                help="同一銘柄の再エントリーをこの営業日数だけ禁止します。",
+            )
+
+        z1, z2, z3, z4 = st.columns(4)
+        with z1:
+            cooldown_days_after_stop = st.slider(
+                "損切り後クールダウン日数",
+                min_value=0,
+                max_value=120,
+                value=int(cv("cooldown_days_after_stop")),
+                step=1,
+                help="損切り・緊急損切り後だけ、同一銘柄の再エントリー禁止期間を長めに設定できます。",
+            )
+        with z2:
+            st.caption("Raw Score、シグナル時RSI、5日上昇率、MA乖離率、スコア構成要素はバックテストCSVへ出力されます。")
+        with z3:
+            st.caption("Score 12が本当に強いか、Raw Score 13以上だけが強いかを後から検証できます。")
+        with z4:
+            st.caption("スコア悪化/MA割れ売却OFFは、売却理由別の悪化要因を切り分けるための検証用です。")
 
         m1, m2 = st.columns(2)
         with m1:
-            max_symbols = st.selectbox("検証対象数", ["先頭30件", "先頭100件", "すべて"], index=0 if not is_fund_file else 1)
+            max_symbol_options = ["先頭30件", "先頭100件", "すべて"]
+            max_symbols = st.selectbox("検証対象数", max_symbol_options, index=selectbox_index(max_symbol_options, cv("max_symbols"), 0 if not is_fund_file else 1))
         with m2:
             st.caption("まずは『すべて』でなく先頭100件程度で挙動確認し、良ければ全件で確認してください。")
+
+        current_conditions = {
+            "condition_name": str(condition_values.get("condition_name", "current_backtest_condition")),
+            "period_value": period_value,
+            "entry_score": int(entry_score),
+            "max_hold_days": int(max_hold_days),
+            "no_overlap": bool(no_overlap),
+            "exit_rule": str(exit_rule),
+            "exit_score": int(exit_score),
+            "trailing_stop_pct": float(trailing_stop_pct),
+            "stop_loss_pct": float(stop_loss_pct),
+            "take_profit_pct": float(take_profit_pct),
+            "min_hold_days": int(min_hold_days),
+            "ma_break_confirm_days": int(ma_break_confirm_days),
+            "ma_break_buffer_pct": float(ma_break_buffer_pct),
+            "emergency_stop_pct": float(emergency_stop_pct),
+            "score_exit_confirm_days": int(score_exit_confirm_days),
+            "warning_score": int(warning_score),
+            "score_drop_points": int(score_drop_points),
+            "peak_stall_days": int(peak_stall_days),
+            "peak_pullback_pct": float(peak_pullback_pct),
+            "momentum_confirm_days": int(momentum_confirm_days),
+            "volume_drop_pct": float(volume_drop_pct),
+            "volume_spike_ratio": float(volume_spike_ratio),
+            "bt_ma_short": int(bt_ma_short),
+            "bt_ma_mid": int(bt_ma_mid),
+            "bt_ma_long": int(bt_ma_long),
+            "use_tiered_trailing": bool(use_tiered_trailing),
+            "buy_filter_ma_deviation_pct": float(buy_filter_ma_deviation_pct),
+            "buy_filter_return_5d_pct": float(buy_filter_return_5d_pct),
+            "min_hold_stop_loss_exception": bool(min_hold_stop_loss_exception),
+            "tier1_profit_pct": float(tier1_profit_pct),
+            "tier1_trailing_pct": float(tier1_trailing_pct),
+            "tier2_profit_pct": float(tier2_profit_pct),
+            "tier2_trailing_pct": float(tier2_trailing_pct),
+            "tier3_profit_pct": float(tier3_profit_pct),
+            "tier3_trailing_pct": float(tier3_trailing_pct),
+            "tier4_profit_pct": float(tier4_profit_pct),
+            "tier4_trailing_pct": float(tier4_trailing_pct),
+            "peak_score_drop_points": int(peak_score_drop_points),
+            "peak_score_profit_pct": float(peak_score_profit_pct),
+            "volume_confirm_next_day": bool(volume_confirm_next_day),
+            "raw_entry_score_min": int(raw_entry_score_min),
+            "use_score_exit": bool(use_score_exit),
+            "use_ma_break_exit": bool(use_ma_break_exit),
+            "cooldown_days_after_exit": int(cooldown_days_after_exit),
+            "cooldown_days_after_stop": int(cooldown_days_after_stop),
+            "max_symbols": str(max_symbols),
+        }
+        s1, s2 = st.columns([2, 1])
+        with s1:
+            save_condition_name = st.text_input(
+                "保存する条件名",
+                value=str(current_conditions.get("condition_name", "current_backtest_condition")),
+                help="この名前がCSVの condition_name になります。複数条件を1つのCSVにまとめたい場合は、CSVを追記編集してください。",
+            )
+        with s2:
+            st.download_button(
+                "現在の条件をCSV保存",
+                data=backtest_conditions_csv_bytes(current_conditions, save_condition_name),
+                file_name="backtest_conditions.csv",
+                mime="text/csv",
+            )
 
     if not validate_ma_values(int(bt_ma_short), int(bt_ma_mid), int(bt_ma_long)):
         st.stop()
@@ -1667,6 +2027,11 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 float(peak_score_profit_pct),
                 bool(volume_confirm_next_day),
                 bool(min_hold_stop_loss_exception),
+                int(raw_entry_score_min),
+                bool(use_score_exit),
+                bool(use_ma_break_exit),
+                int(cooldown_days_after_exit),
+                int(cooldown_days_after_stop),
                 analysis_name_for_row(row),
             )
             if not trades_df.empty:
@@ -1705,6 +2070,11 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
             "peak_score_profit_pct": peak_score_profit_pct,
             "volume_confirm_next_day": volume_confirm_next_day,
             "min_hold_stop_loss_exception": min_hold_stop_loss_exception,
+            "raw_entry_score_min": raw_entry_score_min,
+            "use_score_exit": use_score_exit,
+            "use_ma_break_exit": use_ma_break_exit,
+            "cooldown_days_after_exit": cooldown_days_after_exit,
+            "cooldown_days_after_stop": cooldown_days_after_stop,
             "ma": f"MA{int(bt_ma_short)}/MA{int(bt_ma_mid)}/MA{int(bt_ma_long)}",
             "no_overlap": no_overlap,
             "symbols": len(target_watchlist),
@@ -1731,6 +2101,8 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
         f"買い除外: MA乖離{params.get('buy_filter_ma_deviation_pct')}%以上・5日上昇{params.get('buy_filter_return_5d_pct')}%以上 / "
         f"ピークScore悪化: -{params.get('peak_score_drop_points')}pt・含み益{params.get('peak_score_profit_pct')}%以上 / "
         f"出来高陰線翌日確認: {params.get('volume_confirm_next_day')} / 最低保有中損切り: {params.get('min_hold_stop_loss_exception')} / "
+        f"Raw Score最低: {params.get('raw_entry_score_min')} / スコア悪化売却: {params.get('use_score_exit')} / MA割れ売却: {params.get('use_ma_break_exit')} / "
+        f"通常CD: {params.get('cooldown_days_after_exit')}日 / 損切りCD: {params.get('cooldown_days_after_stop')}日 / "
         f"MA: {params.get('ma')} / 対象: {params.get('symbols')}件"
     )
 
@@ -1816,6 +2188,38 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
             hold_stats[col] = hold_stats[col].map(lambda x: None if pd.isna(x) else round(float(x), 2))
         st.dataframe(hold_stats, use_container_width=True, hide_index=True)
 
+        if "raw_score" in trades_df.columns:
+            st.subheader("Entry Score / Raw Score別の成績")
+            score_stats = trades_df.groupby(["score", "raw_score"], observed=False).agg(
+                件数=("return_pct", "size"),
+                勝率=("win", lambda x: float(x.mean() * 100) if len(x) else 0.0),
+                平均リターン=("return_pct", "mean"),
+                中央値リターン=("return_pct", "median"),
+                平均保有日数=("hold_days", "mean"),
+            ).reset_index().sort_values(["score", "raw_score"])
+            for col in ["勝率", "平均リターン", "中央値リターン", "平均保有日数"]:
+                score_stats[col] = score_stats[col].map(lambda x: None if pd.isna(x) else round(float(x), 2))
+            st.dataframe(score_stats, use_container_width=True, hide_index=True)
+
+        signal_cols = ["signal_rsi", "signal_return_5d", "signal_ma_deviation_pct", "signal_volume_ratio"]
+        if all(col in trades_df.columns for col in signal_cols):
+            st.subheader("買いシグナル条件帯別の成績")
+            signal_df = trades_df.copy()
+            signal_df["RSI帯"] = pd.cut(signal_df["signal_rsi"], bins=[-1, 30, 40, 65, 75, 10_000], labels=["30未満", "30〜40", "40〜65", "65〜75", "75超"])
+            signal_df["5日上昇率帯"] = pd.cut(signal_df["signal_return_5d"], bins=[-10_000, -5, 0, 5, 10, 15, 10_000], labels=["-5%未満", "-5〜0%", "0〜5%", "5〜10%", "10〜15%", "15%以上"])
+            signal_df["MA乖離率帯"] = pd.cut(signal_df["signal_ma_deviation_pct"], bins=[-10_000, -5, 0, 5, 10, 15, 25, 10_000], labels=["-5%未満", "-5〜0%", "0〜5%", "5〜10%", "10〜15%", "15〜25%", "25%以上"])
+            for label_col in ["RSI帯", "5日上昇率帯", "MA乖離率帯"]:
+                tmp = signal_df.groupby(label_col, observed=False).agg(
+                    件数=("return_pct", "size"),
+                    勝率=("win", lambda x: float(x.mean() * 100) if len(x) else 0.0),
+                    平均リターン=("return_pct", "mean"),
+                    中央値リターン=("return_pct", "median"),
+                ).reset_index()
+                for col in ["勝率", "平均リターン", "中央値リターン"]:
+                    tmp[col] = tmp[col].map(lambda x: None if pd.isna(x) else round(float(x), 2))
+                st.caption(label_col)
+                st.dataframe(tmp, use_container_width=True, hide_index=True)
+
         st.subheader("最大含み益別の最終成績")
         gain_bins = [-10_000, 0, 5, 10, 20, 50, 10_000]
         gain_labels = ["0%未満", "0〜5%", "5〜10%", "10〜20%", "20〜50%", "50%以上"]
@@ -1845,10 +2249,15 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
         detail["return_pct"] = detail["return_pct"].round(2)
         if "max_profit_pct" in detail.columns:
             detail["max_profit_pct"] = detail["max_profit_pct"].round(2)
+        for col in ["signal_rsi", "signal_return_5d", "signal_return_20d", "signal_ma_deviation_pct", "signal_volume_ratio"]:
+            if col in detail.columns:
+                detail[col] = detail[col].round(2)
         detail_cols = [
             "signal_date", "entry_date", "exit_date", "symbol", "name",
             *( ["analysis_symbol"] if is_fund_file else [] ),
-            "score", "status", "entry_price", "exit_price", "hold_days", "min_hold_days",
+            "score", "raw_score", "status",
+            "signal_rsi", "signal_return_5d", "signal_return_20d", "signal_ma_deviation_pct", "signal_volume_ratio",
+            "entry_price", "exit_price", "hold_days", "min_hold_days",
             "ma_break_confirm_days", "ma_break_buffer_pct", "emergency_stop_pct",
             "exit_reason", "return_pct", "max_profit_pct", "win",
         ]
@@ -2301,7 +2710,7 @@ if st.session_state["mode"] == "ランキング":
 
     st.subheader("トレンドへ移動")
     for _, row in display_df.iterrows():
-        with st.container(border=True):
+        with st.container():
             c1, c2 = st.columns([3, 1])
             with c1:
                 st.markdown(f"**{row['symbol']} {row['name']}**")
