@@ -1166,6 +1166,25 @@ def calculate_buy_score_at(
     result = build_score_result_from_rows(latest, prev, labels, include_reasons=False)
     return result
 
+
+def is_strictly_decreasing(values: list[float]) -> bool:
+    """リストが連続して低下しているかを判定する。"""
+    if len(values) < 2:
+        return False
+    cleaned = []
+    for v in values:
+        if pd.isna(v):
+            return False
+        cleaned.append(float(v))
+    return all(cleaned[i] < cleaned[i - 1] for i in range(1, len(cleaned)))
+
+
+def pct_change(current: float, base: float) -> float:
+    """baseからcurrentへの変化率を%で返す。"""
+    if base == 0 or pd.isna(base) or pd.isna(current):
+        return 0.0
+    return (float(current) / float(base) - 1) * 100
+
 def run_symbol_backtest_cached(
     symbol: str,
     name: str,
