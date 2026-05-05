@@ -64,6 +64,7 @@ BACKTEST_CONDITION_SPECS = {
     "peak_score_profit_pct": {"type": "float", "default": 5.0, "label": "ピークScore売却の最低含み益%"},
     "volume_confirm_next_day": {"type": "bool", "default": True, "label": "出来高急増陰線は翌日安値割れ確認"},
     "raw_entry_score_min": {"type": "int", "default": 13, "label": "内部Raw Score最低値"},
+    "raw_entry_score_max": {"type": "int", "default": 0, "label": "内部Raw Score上限"},
     "use_score_exit": {"type": "bool", "default": False, "label": "スコア悪化売却を使う"},
     "use_ma_break_exit": {"type": "bool", "default": True, "label": "MA25割れ売却を使う"},
     "cooldown_days_after_exit": {"type": "int", "default": 0, "label": "通常売却後クールダウン日数"},
@@ -75,6 +76,7 @@ BACKTEST_CONDITION_SPECS = {
     "buy_filter_return_5d_min_pct": {"type": "float", "default": -5.0, "label": "買い除外: 5日上昇率下限%"},
     "buy_filter_rsi_min": {"type": "float", "default": 55.0, "label": "買い除外: RSI下限"},
     "buy_filter_rsi_max": {"type": "float", "default": 65.0, "label": "買い除外: RSI上限"},
+    "buy_filter_volume_ratio_min": {"type": "float", "default": 0.0, "label": "買い除外: 出来高倍率下限"},
     "buy_filter_volume_ratio_max": {"type": "float", "default": 2.0, "label": "買い除外: 出来高倍率上限"},
     "max_symbols": {"type": "str", "default": "先頭100件", "label": "検証対象数"},
 }
@@ -1238,6 +1240,7 @@ def run_symbol_backtest_cached(
     volume_confirm_next_day: bool,
     min_hold_stop_loss_exception: bool,
     raw_entry_score_min: int,
+    raw_entry_score_max: int,
     use_score_exit: bool,
     use_ma_break_exit: bool,
     cooldown_days_after_exit: int,
@@ -1249,6 +1252,7 @@ def run_symbol_backtest_cached(
     buy_filter_return_5d_min_pct: float,
     buy_filter_rsi_min: float,
     buy_filter_rsi_max: float,
+    buy_filter_volume_ratio_min: float,
     buy_filter_volume_ratio_max: float,
     analysis_name: str = "",
 ) -> tuple[pd.DataFrame, dict]:
@@ -1471,7 +1475,11 @@ def run_symbol_backtest_cached(
         if signal["score"] < entry_score:
             i += 1
             continue
-        if int(raw_entry_score_min) > 0 and int(signal.get("raw_score", signal["score"])) < int(raw_entry_score_min):
+        raw_score_now = int(signal.get("raw_score", signal["score"]))
+        if int(raw_entry_score_min) > 0 and raw_score_now < int(raw_entry_score_min):
+            i += 1
+            continue
+        if int(raw_entry_score_max) > 0 and raw_score_now > int(raw_entry_score_max):
             i += 1
             continue
 
@@ -1505,8 +1513,12 @@ def run_symbol_backtest_cached(
             if float(buy_filter_rsi_max) > 0 and rsi_now > float(buy_filter_rsi_max):
                 i += 1
                 continue
-        if float(buy_filter_volume_ratio_max) > 0 and not pd.isna(signal_row.get("Volume_Ratio")):
-            if float(signal_row["Volume_Ratio"]) > float(buy_filter_volume_ratio_max):
+        if not pd.isna(signal_row.get("Volume_Ratio")):
+            volume_ratio_now = float(signal_row["Volume_Ratio"])
+            if float(buy_filter_volume_ratio_min) > 0 and volume_ratio_now < float(buy_filter_volume_ratio_min):
+                i += 1
+                continue
+            if float(buy_filter_volume_ratio_max) > 0 and volume_ratio_now > float(buy_filter_volume_ratio_max):
                 i += 1
                 continue
 
@@ -1586,6 +1598,7 @@ def run_symbol_backtest_cached(
                 "buy_filter_return_5d_min_pct": float(buy_filter_return_5d_min_pct),
                 "buy_filter_rsi_min": float(buy_filter_rsi_min),
                 "buy_filter_rsi_max": float(buy_filter_rsi_max),
+                "buy_filter_volume_ratio_min": float(buy_filter_volume_ratio_min),
                 "buy_filter_volume_ratio_max": float(buy_filter_volume_ratio_max),
                 "hold_days": realized_hold_days,
                 "exit_reason": exit_reason,
@@ -1920,6 +1933,14 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 step=1,
                 help="0で無効です。通常Scoreは最大12で丸められるため、丸め前の内部点数でも買いを絞り込めるようにします。",
             )
+            raw_entry_score_max = st.slider(
+                "内部Raw Score上限",
+                min_value=0,
+                max_value=18,
+                value=int(cv("raw_entry_score_max")),
+                step=1,
+                help="0で無効です。Raw Scoreが高すぎる過熱型を除外したい場合に使います。",
+            )
         with v2:
             use_score_exit = st.checkbox(
                 "スコア悪化売却を使う",
@@ -2011,6 +2032,14 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
 
         x1, x2, x3, x4 = st.columns(4)
         with x1:
+            buy_filter_volume_ratio_min = st.slider(
+                "買い除外: 出来高倍率下限",
+                min_value=0.0,
+                max_value=10.0,
+                value=float(cv("buy_filter_volume_ratio_min")),
+                step=0.1,
+                help="シグナル日の出来高倍率がこの値未満なら、出来高不足として買いません。0で無効です。",
+            )
             buy_filter_volume_ratio_max = st.slider(
                 "買い除外: 出来高倍率上限",
                 min_value=0.0,
@@ -2024,7 +2053,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
         with x3:
             st.caption("早期警戒/高値更新停止は今回CSVで悪化寄与が強いため、個別にOFF検証できるようにしています。")
         with x4:
-            st.caption("次の本命条件は Raw13以上 + RSI55〜65 + MA乖離0〜8% + 5日騰落-5〜5% + 出来高2倍以下です。")
+            st.caption("次の本命条件は Raw14前後 + MA乖離1.5〜2.5% + 5日騰落0〜3% + RSI55〜70 + 出来高1.5〜2.0倍近辺です。")
 
         m1, m2 = st.columns(2)
         with m1:
@@ -2075,6 +2104,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
             "peak_score_profit_pct": float(peak_score_profit_pct),
             "volume_confirm_next_day": bool(volume_confirm_next_day),
             "raw_entry_score_min": int(raw_entry_score_min),
+            "raw_entry_score_max": int(raw_entry_score_max),
             "use_score_exit": bool(use_score_exit),
             "use_ma_break_exit": bool(use_ma_break_exit),
             "cooldown_days_after_exit": int(cooldown_days_after_exit),
@@ -2086,6 +2116,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
             "buy_filter_return_5d_min_pct": float(buy_filter_return_5d_min_pct),
             "buy_filter_rsi_min": float(buy_filter_rsi_min),
             "buy_filter_rsi_max": float(buy_filter_rsi_max),
+            "buy_filter_volume_ratio_min": float(buy_filter_volume_ratio_min),
             "buy_filter_volume_ratio_max": float(buy_filter_volume_ratio_max),
             "max_symbols": str(max_symbols),
         }
@@ -2168,6 +2199,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 bool(volume_confirm_next_day),
                 bool(min_hold_stop_loss_exception),
                 int(raw_entry_score_min),
+                int(raw_entry_score_max),
                 bool(use_score_exit),
                 bool(use_ma_break_exit),
                 int(cooldown_days_after_exit),
@@ -2179,6 +2211,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
                 float(buy_filter_return_5d_min_pct),
                 float(buy_filter_rsi_min),
                 float(buy_filter_rsi_max),
+                float(buy_filter_volume_ratio_min),
                 float(buy_filter_volume_ratio_max),
                 analysis_name_for_row(row),
             )
@@ -2219,6 +2252,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
             "volume_confirm_next_day": volume_confirm_next_day,
             "min_hold_stop_loss_exception": min_hold_stop_loss_exception,
             "raw_entry_score_min": raw_entry_score_min,
+            "raw_entry_score_max": raw_entry_score_max,
             "use_score_exit": use_score_exit,
             "use_ma_break_exit": use_ma_break_exit,
             "cooldown_days_after_exit": cooldown_days_after_exit,
@@ -2230,6 +2264,7 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
             "buy_filter_return_5d_min_pct": buy_filter_return_5d_min_pct,
             "buy_filter_rsi_min": buy_filter_rsi_min,
             "buy_filter_rsi_max": buy_filter_rsi_max,
+            "buy_filter_volume_ratio_min": buy_filter_volume_ratio_min,
             "buy_filter_volume_ratio_max": buy_filter_volume_ratio_max,
             "ma": f"MA{int(bt_ma_short)}/MA{int(bt_ma_mid)}/MA{int(bt_ma_long)}",
             "no_overlap": no_overlap,
@@ -2254,10 +2289,10 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
         f"高値更新停止: {params.get('peak_stall_days')}日・押し目{params.get('peak_pullback_pct')}% / "
         f"モメンタム悪化: {params.get('momentum_confirm_days')}日＋終値<短期MA / 出来高陰線: {params.get('volume_drop_pct')}%・{params.get('volume_spike_ratio')}倍 / "
         f"利確: {params.get('take_profit_pct')}% / 段階トレーリング: {params.get('tiered_trailing') if params.get('use_tiered_trailing') else 'OFF'} / "
-        f"買い除外: MA乖離{params.get('buy_filter_ma_deviation_min_pct')}〜{params.get('buy_filter_ma_deviation_pct')}%・5日騰落{params.get('buy_filter_return_5d_min_pct')}〜{params.get('buy_filter_return_5d_pct')}%・RSI{params.get('buy_filter_rsi_min')}〜{params.get('buy_filter_rsi_max')}・出来高{params.get('buy_filter_volume_ratio_max')}倍以下 / "
+        f"買い除外: MA乖離{params.get('buy_filter_ma_deviation_min_pct')}〜{params.get('buy_filter_ma_deviation_pct')}%・5日騰落{params.get('buy_filter_return_5d_min_pct')}〜{params.get('buy_filter_return_5d_pct')}%・RSI{params.get('buy_filter_rsi_min')}〜{params.get('buy_filter_rsi_max')}・出来高{params.get('buy_filter_volume_ratio_min')}〜{params.get('buy_filter_volume_ratio_max')}倍 / "
         f"ピークScore悪化: -{params.get('peak_score_drop_points')}pt・含み益{params.get('peak_score_profit_pct')}%以上 / "
         f"出来高陰線翌日確認: {params.get('volume_confirm_next_day')} / 最低保有中損切り: {params.get('min_hold_stop_loss_exception')} / "
-        f"Raw Score最低: {params.get('raw_entry_score_min')} / スコア悪化売却: {params.get('use_score_exit')} / MA割れ売却: {params.get('use_ma_break_exit')} / "
+        f"Raw Score: {params.get('raw_entry_score_min')}〜{params.get('raw_entry_score_max') if params.get('raw_entry_score_max') else '上限なし'} / スコア悪化売却: {params.get('use_score_exit')} / MA割れ売却: {params.get('use_ma_break_exit')} / "
         f"早期警戒売却: {params.get('use_early_warning_exit')} / 高値更新停止売却: {params.get('use_peak_stall_exit')} / 出来高陰線売却: {params.get('use_volume_down_exit')} / "
         f"通常CD: {params.get('cooldown_days_after_exit')}日 / 損切りCD: {params.get('cooldown_days_after_stop')}日 / "
         f"MA: {params.get('ma')} / 対象: {params.get('symbols')}件"
