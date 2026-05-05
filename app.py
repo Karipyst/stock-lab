@@ -2434,15 +2434,24 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
 
         st.subheader("トレード明細")
         detail = trades_df.copy()
-        # Streamlit Cloud / pandas の環境差で、日付列に Timestamp と文字列が混在すると
-        # sort_values() が TypeError になるため、先に datetime64 に正規化する。
-        for col in ["entry_date", "exit_date", "signal_date"]:
-            if col in detail.columns:
-                detail[col] = pd.to_datetime(detail[col], errors="coerce")
-        detail = detail.sort_values("entry_date", ascending=False, na_position="last").copy()
-        for col in ["entry_date", "exit_date", "signal_date"]:
-            if col in detail.columns:
-                detail[col] = detail[col].dt.strftime("%Y-%m-%d").fillna("")
+
+        # Streamlit Cloud / pandas の環境差で、日付列に Timestamp / datetime.date / 文字列 / NaT が
+        # 混在すると sort_values() が TypeError になることがある。
+        # そのため、表示用日付とは別に、UTC基準で正規化した一時ソート列を作って並び替える。
+        def _normalize_datetime_series(series: pd.Series) -> pd.Series:
+            text = series.astype("string").replace({"NaT": pd.NA, "None": pd.NA, "nan": pd.NA, "": pd.NA})
+            return pd.to_datetime(text, errors="coerce", utc=True).dt.tz_convert(None)
+
+        date_cols = [col for col in ["entry_date", "exit_date", "signal_date"] if col in detail.columns]
+        for col in date_cols:
+            detail[col] = _normalize_datetime_series(detail[col])
+
+        if "entry_date" in detail.columns:
+            detail["_entry_date_sort"] = detail["entry_date"]
+            detail = detail.sort_values("_entry_date_sort", ascending=False, na_position="last").drop(columns=["_entry_date_sort"]).copy()
+
+        for col in date_cols:
+            detail[col] = detail[col].dt.strftime("%Y-%m-%d").fillna("")
         detail["entry_price"] = detail["entry_price"].round(2)
         detail["exit_price"] = detail["exit_price"].round(2)
         detail["return_pct"] = detail["return_pct"].round(2)
