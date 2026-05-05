@@ -1027,6 +1027,230 @@ def build_score_result_from_rows(latest: pd.Series, prev: pd.Series, labels: dic
     }
 
 
+
+
+
+def _safe_float(value, default: float | None = None) -> float | None:
+    """NaN/Noneに強いfloat変換。ランキング用スコアで使う。"""
+    try:
+        if pd.isna(value):
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _aa_buy_timing_score(score_result: dict) -> tuple[int, str]:
+    """AA条件を100点換算した買いタイミング評価。
+
+    バックテストで強かった AA/AB/T/W 系の知見を反映する。
+    重要度は、Raw Score・MA25乖離・出来高を重め、RSI・5日騰落を中程度にする。
+    """
+    score = int(score_result.get("score", 0) or 0)
+    raw = int(score_result.get("raw_score", score) or 0)
+    ma_dev = _safe_float(score_result.get("signal_ma_deviation_pct"), None)
+    rsi = _safe_float(score_result.get("signal_rsi"), None)
+    ret5 = _safe_float(score_result.get("signal_return_5d"), None)
+    vol = _safe_float(score_result.get("signal_volume_ratio"), None)
+
+    points = 0.0
+    notes: list[str] = []
+
+    # 25点: Raw Score。通常scoreは12で丸められるため、丸め前Rawを重視。
+    if raw == 14:
+        points += 25
+        notes.append("Raw14")
+    elif raw in {13, 16}:
+        points += 21
+        notes.append(f"Raw{raw}")
+    elif raw == 15:
+        points += 18
+        notes.append("Raw15")
+    elif raw == 12:
+        points += 10
+    elif raw >= 11:
+        points += 6
+
+    # 25点: MA25乖離。AA以降は1.5〜2.5%が強く、近すぎても離れすぎても弱い。
+    if ma_dev is not None:
+        if 1.5 <= ma_dev <= 2.5:
+            points += 25
+            notes.append("MA乖離◎")
+        elif 1.0 <= ma_dev <= 3.0:
+            points += 18
+            notes.append("MA乖離○")
+        elif 0.5 <= ma_dev <= 4.0:
+            points += 10
+        elif 0.0 <= ma_dev <= 5.0:
+            points += 5
+
+    # 20点: 出来高。1.5〜2.0倍が明確に強く、1.2倍は弱め。
+    if vol is not None:
+        if 1.5 <= vol <= 2.0:
+            points += 20
+            notes.append("出来高◎")
+        elif 2.0 < vol <= 2.5:
+            points += 12
+            notes.append("出来高やや過熱")
+        elif 1.2 <= vol < 1.5:
+            points += 7
+        elif 1.0 <= vol < 1.2:
+            points += 2
+
+    # 15点: RSI。AAは55〜60、ABは55〜63が良好。70超は買い評価を抑える。
+    if rsi is not None:
+        if 55 <= rsi <= 60:
+            points += 15
+            notes.append("RSI◎")
+        elif 60 < rsi <= 63:
+            points += 12
+            notes.append("RSI○")
+        elif 50 <= rsi < 55 or 63 < rsi <= 70:
+            points += 6
+        elif 40 <= rsi < 50:
+            points += 2
+
+    # 15点: 5日騰落。0〜3%が強く、急騰しすぎは天井掴みを避けるため減点気味。
+    if ret5 is not None:
+        if 0 <= ret5 <= 3:
+            points += 15
+            notes.append("5日騰落◎")
+        elif -1 <= ret5 < 0 or 3 < ret5 <= 5:
+            points += 7
+        elif -3 <= ret5 < -1:
+            points += 2
+
+    # ベースScoreが弱いものは、個別条件が偶然揃っても上位に出過ぎないように抑制。
+    if score < 11:
+        points *= 0.65
+    if raw < 13:
+        points *= 0.70
+
+    buy_score = int(round(max(0, min(100, points))))
+    if buy_score >= 85:
+        label = "強い買い"
+    elif buy_score >= 70:
+        label = "買い候補"
+    elif buy_score >= 50:
+        label = "監視"
+    else:
+        label = "見送り"
+
+    if notes:
+        label = f"{label}（{', '.join(notes[:3])}）"
+    return buy_score, label
+
+
+def _aa_sell_timing_score(df: pd.DataFrame, score_result: dict, ma_short: int, ma_mid: int, ma_long: int) -> tuple[int, str]:
+    """現在値ベースの売りタイミング評価。
+
+    実際の保有価格・保有中高値はランキング画面では分からないため、
+    バックテストで有効だった「短期モメンタム悪化 + 終値<MA5」を中心に、
+    現時点のテクニカル悪化度を100点換算する。
+    """
+    if df is None or df.empty or len(df) < 6:
+        return 0, "判定不可"
+
+    labels = ma_labels(ma_short, ma_mid, ma_long)
+    required = ["Close", "Open", "Low", labels["short"], labels["mid"], "MACD_DIFF", "Return_5d", "RSI", "Volume_Ratio"]
+    if any(col not in df.columns for col in required):
+        return 0, "判定不可"
+
+    rows4 = df.tail(4)
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
+    if rows4[[labels["short"], "MACD_DIFF", "Return_5d", "Close"]].isna().any().any():
+        return 0, "判定不可"
+
+    close = _safe_float(latest.get("Close"), 0.0) or 0.0
+    open_ = _safe_float(latest.get("Open"), 0.0) or 0.0
+    low_prev = _safe_float(prev.get("Low"), None)
+    ma_s = _safe_float(latest.get(labels["short"]), None)
+    ma_m = _safe_float(latest.get(labels["mid"]), None)
+    ma_s_prev = _safe_float(prev.get(labels["short"]), None)
+    ret5 = _safe_float(latest.get("Return_5d"), None)
+    rsi = _safe_float(latest.get("RSI"), None)
+    vol = _safe_float(latest.get("Volume_Ratio"), None)
+    raw = int(score_result.get("raw_score", score_result.get("score", 0)) or 0)
+
+    ma_values = [_safe_float(v, None) for v in rows4[labels["short"]].tolist()]
+    macd_values = [_safe_float(v, None) for v in rows4["MACD_DIFF"].tolist()]
+    ma_values_ok = all(v is not None for v in ma_values)
+    macd_values_ok = all(v is not None for v in macd_values)
+
+    short_ma_break = bool(ma_s is not None and close < ma_s)
+    short_ma_slope_down = bool(ma_s is not None and ma_s_prev is not None and ma_s < ma_s_prev)
+    macd_down = bool(macd_values_ok and is_strictly_decreasing([float(v) for v in macd_values]))
+    return5_negative = bool(ret5 is not None and ret5 < 0)
+    short_momentum_exit = bool(short_ma_break and short_ma_slope_down and macd_down and return5_negative)
+
+    points = 0.0
+    notes: list[str] = []
+
+    # 45点: バックテストで最も機能した売却シグナル。
+    if short_momentum_exit:
+        points += 45
+        notes.append("短期モメンタム悪化")
+    else:
+        if short_ma_break:
+            points += 14
+            notes.append("終値<MA5")
+        if short_ma_slope_down:
+            points += 8
+        if macd_down:
+            points += 10
+        if return5_negative:
+            points += 6
+
+    # 15点: 中期MA割れは本命戦略ではOFFだが、警戒材料としては残す。
+    if ma_m is not None:
+        if close < ma_m:
+            points += 10
+            notes.append("終値<MA25")
+        elif close < ma_m * 1.01:
+            points += 4
+
+    # 15点: 出来高急増陰線・翌日安値割れ系の代替評価。
+    daily_ret = pct_change(close, open_) if open_ else 0.0
+    volume_down = bool(close < open_ and daily_ret <= -3.0 and vol is not None and vol >= 1.8)
+    next_day_break_like = bool(low_prev is not None and close < low_prev and vol is not None and vol >= 1.5 and return5_negative)
+    if volume_down or next_day_break_like:
+        points += 15
+        notes.append("出来高陰線警戒")
+
+    # 15点: 過熱後の失速。買いには不向きで、利確・撤退を検討する水準。
+    if rsi is not None:
+        if rsi >= 75 and return5_negative:
+            points += 12
+            notes.append("過熱失速")
+        elif rsi >= 70 and return5_negative:
+            points += 8
+        elif rsi >= 75:
+            points += 5
+
+    # 10点: Raw Score低下は単独売却には使わないが、補助警戒として使う。
+    if raw <= 8 and short_ma_break:
+        points += 10
+        notes.append("Raw低下")
+    elif raw <= 10 and short_ma_break:
+        points += 5
+
+    sell_score = int(round(max(0, min(100, points))))
+    if sell_score >= 80:
+        label = "強い売り"
+    elif sell_score >= 60:
+        label = "売り候補"
+    elif sell_score >= 40:
+        label = "警戒"
+    elif sell_score >= 20:
+        label = "軽警戒"
+    else:
+        label = "売り急がない"
+
+    if notes:
+        label = f"{label}（{', '.join(notes[:3])}）"
+    return sell_score, label
+
 def calculate_buy_score(
     df: pd.DataFrame,
     ma_short: int,
@@ -1095,6 +1319,11 @@ def analyze_symbol(
             "analysis_name": analysis_name,
             "analysis_note": analysis_note,
             "score": 0,
+            "raw_score": 0,
+            "buy_timing_score": 0,
+            "buy_timing_label": "判定不可",
+            "sell_timing_score": 0,
+            "sell_timing_label": "判定不可",
             "status": "取得失敗",
             "unit_price": None,
             "price_band": "不明",
@@ -1119,6 +1348,11 @@ def analyze_symbol(
             "analysis_name": analysis_name,
             "analysis_note": analysis_note,
             "score": result["score"],
+            "raw_score": result.get("raw_score", result["score"]),
+            "buy_timing_score": 0,
+            "buy_timing_label": "判定不可",
+            "sell_timing_score": 0,
+            "sell_timing_label": "判定不可",
             "status": result["status"],
             "unit_price": None,
             "price_band": "不明",
@@ -1131,6 +1365,8 @@ def analyze_symbol(
         }
 
     close = latest["Close"]
+    buy_timing_score, buy_timing_label = _aa_buy_timing_score(result)
+    sell_timing_score, sell_timing_label = _aa_sell_timing_score(df, result, ma_short, ma_mid, ma_long)
 
     return {
         "symbol": symbol,
@@ -1140,6 +1376,12 @@ def analyze_symbol(
         "analysis_name": analysis_name,
         "analysis_note": analysis_note,
         "score": result["score"],
+        "raw_score": result.get("raw_score", result["score"]),
+        "buy_timing_score": buy_timing_score,
+        "buy_timing_label": buy_timing_label,
+        "sell_timing_score": sell_timing_score,
+        "sell_timing_label": sell_timing_label,
+        "ma_deviation_pct": result.get("signal_ma_deviation_pct"),
         "status": result["status"],
         "unit_price": close,
         "price_band": "プロキシ" if is_proxy_analysis(symbol, data_symbol) else price_band_label(close, symbol),
@@ -2793,18 +3035,21 @@ if st.session_state["mode"] == "ランキング":
     with st.expander("スコアの考え方を表示"):
         st.markdown(
             """
-スコアは以下の条件をもとに作っています。
+ランキングには、従来の `Score` に加えて、バックテスト結果を反映した **買いタイミング点** と **売りタイミング点** を表示します。
 
-- 終値が25日移動平均線より上
-- 5日移動平均線が25日移動平均線より上
-- 25日移動平均線が75日移動平均線より上
-- RSIが40〜65
-- MACDがSignalより上
-- MACDが直近で陽転
-- 出来高が20日平均より多い
-- 直近5日・20日のリターンがプラス
+### 買いタイミング点 / 100点
+AA条件で良かった範囲を基準にしています。配点は以下です。
 
-高スコアほど「テクニカル面では買い候補に近い」という意味です。
+- Raw Score：25点
+- MA25乖離率：25点、特に 1.5〜2.5% を重視
+- 出来高倍率：20点、特に 1.5〜2.0倍を重視
+- RSI：15点、特に 55〜60、次点で55〜63を重視
+- 5日騰落率：15点、特に 0〜3% を重視
+
+### 売りタイミング点 / 100点
+ランキング画面では保有価格・保有中高値が分からないため、現在のテクニカル悪化度で評価します。バックテストで最も機能した `短期モメンタム悪化4日 + 終値<MA5` を中心に点数化しています。
+
+高いほど「新規買い」ではなく「撤退・利確警戒」に近い状態です。
 """
         )
 
@@ -2856,7 +3101,13 @@ if st.session_state["mode"] == "ランキング":
         ]
 
     display_df = ranking_df.copy()
-    display_df = display_df.sort_values(by=["score", "volume_ratio"], ascending=[False, False])
+    # バックテストAA条件を反映した買いタイミング点を主ランキングにする。
+    # 売りタイミング点が高い銘柄は、買い点が高くても下位に回りやすいように並べる。
+    display_df = display_df.sort_values(
+        by=["buy_timing_score", "sell_timing_score", "score", "volume_ratio"],
+        ascending=[False, True, False, False],
+        na_position="last",
+    )
 
     price_label = "プロキシ価格" if is_fund_file else "株価単価"
     unit_label = "概算単元金額"
@@ -2870,11 +3121,13 @@ if st.session_state["mode"] == "ランキング":
     display_df["macd_diff"] = display_df["macd_diff"].map(lambda x: None if pd.isna(x) else round(x, 2))
     display_df["return_5d"] = display_df["return_5d"].map(lambda x: None if pd.isna(x) else round(x, 2))
     display_df["return_20d"] = display_df["return_20d"].map(lambda x: None if pd.isna(x) else round(x, 2))
+    display_df["ma_deviation_pct"] = display_df["ma_deviation_pct"].map(lambda x: None if pd.isna(x) else round(x, 2))
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     col1.metric("分析表示銘柄数", len(display_df))
-    col2.metric("強い買い候補", int((display_df["score"] >= 9).sum()))
-    col3.metric("買い候補以上", int((display_df["score"] >= 6).sum()))
+    col2.metric("買い80点以上", int((display_df["buy_timing_score"] >= 80).sum()))
+    col3.metric("買い70点以上", int((display_df["buy_timing_score"] >= 70).sum()))
+    col4.metric("売り60点以上", int((display_df["sell_timing_score"] >= 60).sum()))
 
     st.dataframe(
         display_df[
@@ -2883,11 +3136,17 @@ if st.session_state["mode"] == "ランキング":
                 "name",
                 "theme",
                 *(["analysis_symbol", "analysis_name"] if is_fund_file else []),
+                "buy_timing_score",
+                "buy_timing_label",
+                "sell_timing_score",
+                "sell_timing_label",
                 "score",
+                "raw_score",
                 "status",
                 price_label,
                 "price_band",
                 unit_label,
+                "ma_deviation_pct",
                 "rsi",
                 "volume_ratio",
                 "macd_diff",
@@ -2903,11 +3162,17 @@ if st.session_state["mode"] == "ランキング":
             "theme": "テーマ",
             "analysis_symbol": "分析用ティッカー",
             "analysis_name": "分析用プロキシ",
-            "score": "スコア",
-            "status": "判定",
+            "buy_timing_score": "買い点",
+            "buy_timing_label": "買い判定",
+            "sell_timing_score": "売り点",
+            "sell_timing_label": "売り判定",
+            "score": "Score",
+            "raw_score": "Raw Score",
+            "status": "従来判定",
             price_label: price_label,
             unit_label: unit_label,
             "price_band": "価格帯",
+            "ma_deviation_pct": "MA25乖離%",
             "rsi": "RSI",
             "volume_ratio": "出来高倍率",
             "macd_diff": "MACD差分",
@@ -2929,8 +3194,12 @@ if st.session_state["mode"] == "ランキング":
 
     st.subheader("上位銘柄の理由")
     for _, row in display_df.head(5).iterrows():
-        with st.expander(f"{row['symbol']} {row['name']} / Score {row['score']} / {row['status']}"):
+        with st.expander(
+            f"{row['symbol']} {row['name']} / 買い{row['buy_timing_score']}点 / 売り{row['sell_timing_score']}点 / Raw {row['raw_score']}"
+        ):
             matched = ranking_df[ranking_df["symbol"] == row["symbol"]].iloc[0]
+            st.write(f"買い判定: {matched.get('buy_timing_label', '')}")
+            st.write(f"売り判定: {matched.get('sell_timing_label', '')}")
             for reason in matched["reasons"]:
                 st.write(f"- {reason}")
 
