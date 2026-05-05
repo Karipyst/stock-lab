@@ -301,8 +301,9 @@ def load_score_history(path_text: str = str(HISTORY_PATH)) -> pd.DataFrame:
     if "run_date" in df.columns:
         df["run_date"] = pd.to_datetime(df["run_date"], errors="coerce")
     numeric_cols = [
-        "score", "unit_price", "rsi", "volume_ratio", "macd_diff",
-        "return_5d", "return_20d",
+        "score", "raw_score", "unit_price", "rsi", "volume_ratio", "macd_diff",
+        "return_5d", "return_20d", "buy_timing_score", "sell_timing_score",
+        "ma_deviation_pct",
     ]
     for col in numeric_cols:
         if col in df.columns:
@@ -343,15 +344,148 @@ def show_score_history(watchlist: pd.DataFrame):
     c2.metric("最新保存日", latest_date.strftime("%Y-%m-%d"))
     c3.metric("最新保存銘柄数", len(latest))
 
-    latest_view = latest.sort_values(["score", "volume_ratio"], ascending=[False, False], na_position="last")
+    latest_sort_cols = []
+    latest_sort_asc = []
+    if "buy_timing_score" in latest.columns:
+        latest_sort_cols.append("buy_timing_score")
+        latest_sort_asc.append(False)
+    latest_sort_cols += [col for col in ["score", "volume_ratio"] if col in latest.columns]
+    latest_sort_asc += [False for _ in latest_sort_cols[len(latest_sort_asc):]]
+    latest_view = latest.sort_values(latest_sort_cols, ascending=latest_sort_asc, na_position="last") if latest_sort_cols else latest.copy()
+
     st.subheader("最新スコア")
     show_cols = [
         col for col in [
-            "run_date", "symbol", "name", "theme", "score", "status", "unit_price",
-            "rsi", "volume_ratio", "macd_diff", "return_5d", "return_20d",
+            "run_date", "symbol", "name", "theme", "score", "raw_score",
+            "buy_timing_score", "buy_timing_label", "sell_timing_score", "sell_timing_label",
+            "status", "unit_price", "ma_deviation_pct", "rsi", "volume_ratio",
+            "macd_diff", "return_5d", "return_20d",
         ] if col in latest_view.columns
     ]
     st.dataframe(latest_view[show_cols], use_container_width=True, hide_index=True)
+
+    buy_score_col = "buy_timing_score" if "buy_timing_score" in history.columns else "score"
+    sell_score_col = "sell_timing_score" if "sell_timing_score" in history.columns else None
+
+    latest_meta = latest.drop_duplicates("symbol").set_index("symbol")
+    latest_name_map = latest_meta["name"].to_dict() if "name" in latest_meta.columns else {}
+
+    def build_top_labels(df: pd.DataFrame, score_col: str, top_n: int = 5) -> list[str]:
+        order_cols = [score_col]
+        ascending = [False]
+        if "raw_score" in df.columns:
+            order_cols.append("raw_score")
+            ascending.append(False)
+        if "score" in df.columns and score_col != "score":
+            order_cols.append("score")
+            ascending.append(False)
+        if "volume_ratio" in df.columns:
+            order_cols.append("volume_ratio")
+            ascending.append(False)
+        picked = df.sort_values(order_cols, ascending=ascending, na_position="last").head(top_n).copy()
+        labels = []
+        for _, row in picked.iterrows():
+            val = row.get(score_col)
+            name = row.get("name", "")
+            symbol = row.get("symbol", "")
+            label = f"{symbol} | {name} | {score_col} {val:.0f}" if pd.notna(val) else f"{symbol} | {name}"
+            labels.append(label)
+        return labels
+
+    def label_to_symbol(labels: list[str]) -> dict[str, str]:
+        mapping = {}
+        for label in labels:
+            mapping[label] = label.split("|")[0].strip()
+        return mapping
+
+    def render_timing_chart(title: str, source_df: pd.DataFrame, score_col: str, y_title: str, help_text: str, top_n: int = 5):
+        st.subheader(title)
+        st.caption(help_text)
+        if score_col not in source_df.columns:
+            st.info(f"{score_col} 列がないため、このグラフは表示できません。")
+            return
+        labels = build_top_labels(source_df, score_col, top_n=top_n)
+        if not labels:
+            st.info("表示できる履歴データがありません。")
+            return
+        mapping = label_to_symbol(labels)
+        selected_labels = st.multiselect(
+            f"表示銘柄（{title}）",
+            labels,
+            default=labels,
+            key=f"multiselect_{score_col}",
+            help="初期表示は最新時点の上位5銘柄です。必要に応じて表示銘柄を絞り込めます。",
+        )
+        selected_symbols = [mapping[label] for label in selected_labels]
+        if not selected_symbols:
+            st.info("表示銘柄が選択されていません。")
+            return
+
+        fig = go.Figure()
+        for sym in selected_symbols:
+            trend = history[history["symbol"] == sym].sort_values("run_date").copy()
+            if trend.empty or score_col not in trend.columns:
+                continue
+            name = latest_name_map.get(sym, sym)
+            latest_row = trend.iloc[-1]
+            latest_value = latest_row.get(score_col)
+            trace_name = f"{sym} {name}"
+            if pd.notna(latest_value):
+                trace_name += f" / 最新{latest_value:.0f}"
+            fig.add_trace(
+                go.Scatter(
+                    x=trend["run_date"],
+                    y=trend[score_col],
+                    name=trace_name,
+                    mode="lines+markers",
+                    line=dict(width=3),
+                )
+            )
+        max_y = 100 if score_col in {"buy_timing_score", "sell_timing_score"} else None
+        fig.update_layout(
+            height=420,
+            margin=dict(l=10, r=10, t=24, b=10),
+            yaxis=dict(title=y_title, range=[0, max_y] if max_y else None),
+            xaxis=dict(title="保存日"),
+            legend=dict(orientation="h", yanchor="bottom", y=-0.35, xanchor="left", x=0),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+        latest_selected = latest[latest["symbol"].isin(selected_symbols)].copy()
+        detail_cols = [
+            col for col in [
+                "run_date", "symbol", "name", score_col,
+                "buy_timing_score", "buy_timing_label",
+                "sell_timing_score", "sell_timing_label",
+                "score", "raw_score", "status", "unit_price",
+                "ma_deviation_pct", "rsi", "volume_ratio", "return_5d", "return_20d",
+            ] if col in latest_selected.columns
+        ]
+        if not latest_selected.empty and detail_cols:
+            st.dataframe(
+                latest_selected.sort_values(score_col, ascending=False, na_position="last")[detail_cols],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    render_timing_chart(
+        title="買い点数 上位5銘柄の推移",
+        source_df=latest,
+        score_col=buy_score_col,
+        y_title="買い点数",
+        help_text="最新保存日時点の買い点数上位5銘柄を対象に、買い点数の推移を表示します。",
+        top_n=5,
+    )
+
+    if sell_score_col:
+        render_timing_chart(
+            title="売り点数 上位5銘柄の推移",
+            source_df=latest,
+            score_col=sell_score_col,
+            y_title="売り点数",
+            help_text="最新保存日時点の売り点数上位5銘柄を対象に、売り点数の推移を表示します。売り点数が高いほど利確・撤退警戒が強い状態です。",
+            top_n=5,
+        )
 
     st.subheader("銘柄別の履歴")
     history_symbols = set(history["symbol"])
@@ -364,94 +498,14 @@ def show_score_history(watchlist: pd.DataFrame):
     symbol = selected.split("|")[0].strip()
     one = history[history["symbol"] == symbol].sort_values("run_date").copy()
 
-    st.subheader("スコア推移")
-    st.caption("選択銘柄に加えて、最新保存日時点で「強い買い候補」の銘柄を同じグラフに重ねて表示できます。")
-
-    latest_strong = latest[latest["status"] == "強い買い候補"].copy()
-    latest_strong = latest_strong.sort_values(["score", "volume_ratio"], ascending=[False, False], na_position="last")
-
-    strong_options = []
-    strong_label_to_symbol = {}
-    for _, row in latest_strong.iterrows():
-        label = f"{row['symbol']} | {row['name']} | Score {row['score']}"
-        strong_options.append(label)
-        strong_label_to_symbol[label] = row["symbol"]
-
-    default_strong_options = strong_options[: min(8, len(strong_options))]
-    selected_strong_labels = st.multiselect(
-        "同じグラフに重ねる強い買い候補",
-        strong_options,
-        default=default_strong_options,
-        help="最新保存日時点で status が『強い買い候補』の銘柄です。多すぎると見づらくなるため、初期表示は上位8件までにしています。",
-    )
-
-    overlay_symbols = [strong_label_to_symbol[label] for label in selected_strong_labels]
-    chart_symbols = []
-    if symbol not in chart_symbols:
-        chart_symbols.append(symbol)
-    for overlay_symbol in overlay_symbols:
-        if overlay_symbol not in chart_symbols:
-            chart_symbols.append(overlay_symbol)
-
-    latest_name_map = latest.drop_duplicates("symbol").set_index("symbol")["name"].to_dict()
-    latest_score_map = latest.drop_duplicates("symbol").set_index("symbol")["score"].to_dict()
-    latest_status_map = latest.drop_duplicates("symbol").set_index("symbol")["status"].to_dict()
-
-    fig = go.Figure()
-    for chart_symbol in chart_symbols:
-        trend = history[history["symbol"] == chart_symbol].sort_values("run_date").copy()
-        if trend.empty:
-            continue
-        chart_name = latest_name_map.get(chart_symbol, chart_symbol)
-        latest_score = latest_score_map.get(chart_symbol)
-        latest_status = latest_status_map.get(chart_symbol, "")
-        trace_name = f"{chart_symbol} {chart_name}"
-        if pd.notna(latest_score):
-            trace_name += f" / 最新{latest_score:.0f}"
-        if latest_status:
-            trace_name += f" / {latest_status}"
-
-        fig.add_trace(
-            go.Scatter(
-                x=trend["run_date"],
-                y=trend["score"],
-                name=trace_name,
-                mode="lines+markers",
-                line=dict(width=4 if chart_symbol == symbol else 2),
-            )
-        )
-
-    fig.add_hrect(y0=9, y1=12, opacity=0.08, line_width=0, annotation_text="強い買い候補", annotation_position="top left")
-    fig.add_hrect(y0=6, y1=9, opacity=0.05, line_width=0, annotation_text="買い候補", annotation_position="bottom left")
-    fig.update_layout(
-        height=420,
-        margin=dict(l=10, r=10, t=24, b=10),
-        yaxis=dict(range=[0, 12], title="スコア"),
-        xaxis=dict(title="保存日"),
-        legend=dict(orientation="h", yanchor="bottom", y=-0.35, xanchor="left", x=0),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-    if latest_strong.empty:
-        st.info("最新保存日時点で『強い買い候補』の銘柄はありません。")
-    else:
-        with st.expander("最新の強い買い候補一覧", expanded=False):
-            strong_cols = [
-                col for col in [
-                    "run_date", "symbol", "name", "theme", "score", "status", "unit_price",
-                    "rsi", "volume_ratio", "macd_diff", "return_5d", "return_20d",
-                ] if col in latest_strong.columns
-            ]
-            st.dataframe(latest_strong[strong_cols], use_container_width=True, hide_index=True)
-
     detail_cols = [
         col for col in [
-            "run_date", "score", "status", "unit_price", "rsi", "volume_ratio",
-            "macd_diff", "return_5d", "return_20d",
+            "run_date", "score", "raw_score", "buy_timing_score", "buy_timing_label",
+            "sell_timing_score", "sell_timing_label", "status", "unit_price", "ma_deviation_pct",
+            "rsi", "volume_ratio", "macd_diff", "return_5d", "return_20d",
         ] if col in one.columns
     ]
     st.dataframe(one[detail_cols].sort_values("run_date", ascending=False), use_container_width=True, hide_index=True)
-
 
 def find_watchlist_files() -> list[str]:
     """同じ階層にある watchlist*.csv を候補として表示する。"""
