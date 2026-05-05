@@ -335,42 +335,58 @@ def show_score_history(watchlist: pd.DataFrame):
         st.warning("有効な履歴データがありません。")
         return
 
-    history = history.sort_values(["run_date", "symbol"])
+    # 過去版の score_history.csv には list_name が無い場合があるため補完する。
+    if "list_name" not in history.columns:
+        history["list_name"] = "watchlist.csv"
+    history["list_name"] = history["list_name"].fillna("未分類CSV").astype(str).replace("", "未分類CSV")
+
+    history = history.sort_values(["run_date", "list_name", "symbol"])
     latest_date = history["run_date"].max()
-    latest = history[history["run_date"] == latest_date].copy()
+    latest_all = history[history["run_date"] == latest_date].copy()
 
     c1, c2, c3 = st.columns(3)
     c1.metric("履歴日数", history["run_date"].dt.date.nunique())
     c2.metric("最新保存日", latest_date.strftime("%Y-%m-%d"))
-    c3.metric("最新保存銘柄数", len(latest))
+    c3.metric("最新保存銘柄数", len(latest_all))
 
-    latest_sort_cols = []
-    latest_sort_asc = []
-    if "buy_timing_score" in latest.columns:
-        latest_sort_cols.append("buy_timing_score")
-        latest_sort_asc.append(False)
-    latest_sort_cols += [col for col in ["score", "volume_ratio"] if col in latest.columns]
-    latest_sort_asc += [False for _ in latest_sort_cols[len(latest_sort_asc):]]
-    latest_view = latest.sort_values(latest_sort_cols, ascending=latest_sort_asc, na_position="last") if latest_sort_cols else latest.copy()
+    def unique_cols(cols: list[str]) -> list[str]:
+        """pyarrowエラー回避のため、表示列の重複を除外する。"""
+        out = []
+        seen = set()
+        for col in cols:
+            if col in seen:
+                continue
+            seen.add(col)
+            out.append(col)
+        return out
 
+    def sort_latest_view(df: pd.DataFrame) -> pd.DataFrame:
+        sort_cols = []
+        ascending = []
+        for col in ["buy_timing_score", "score", "volume_ratio"]:
+            if col in df.columns:
+                sort_cols.append(col)
+                ascending.append(False)
+        return df.sort_values(sort_cols, ascending=ascending, na_position="last") if sort_cols else df.copy()
+
+    latest_view_all = sort_latest_view(latest_all)
     st.subheader("最新スコア")
-    show_cols = [
+    show_cols = unique_cols([
         col for col in [
-            "run_date", "symbol", "name", "theme", "score", "raw_score",
+            "run_date", "list_name", "symbol", "name", "theme", "score", "raw_score",
             "buy_timing_score", "buy_timing_label", "sell_timing_score", "sell_timing_label",
             "status", "unit_price", "ma_deviation_pct", "rsi", "volume_ratio",
             "macd_diff", "return_5d", "return_20d",
-        ] if col in latest_view.columns
-    ]
-    st.dataframe(latest_view[show_cols], use_container_width=True, hide_index=True)
+        ] if col in latest_view_all.columns
+    ])
+    st.dataframe(latest_view_all[show_cols], use_container_width=True, hide_index=True)
 
     buy_score_col = "buy_timing_score" if "buy_timing_score" in history.columns else "score"
     sell_score_col = "sell_timing_score" if "sell_timing_score" in history.columns else None
 
-    latest_meta = latest.drop_duplicates("symbol").set_index("symbol")
-    latest_name_map = latest_meta["name"].to_dict() if "name" in latest_meta.columns else {}
-
     def build_top_labels(df: pd.DataFrame, score_col: str, top_n: int = 5) -> list[str]:
+        if df.empty or score_col not in df.columns:
+            return []
         order_cols = [score_col]
         ascending = [False]
         if "raw_score" in df.columns:
@@ -398,13 +414,23 @@ def show_score_history(watchlist: pd.DataFrame):
             mapping[label] = label.split("|")[0].strip()
         return mapping
 
-    def render_timing_chart(title: str, source_df: pd.DataFrame, score_col: str, y_title: str, help_text: str, top_n: int = 5):
+    def render_timing_chart(
+        *,
+        title: str,
+        history_scope: pd.DataFrame,
+        latest_scope: pd.DataFrame,
+        score_col: str,
+        y_title: str,
+        help_text: str,
+        key_suffix: str,
+        top_n: int = 5,
+    ):
         st.subheader(title)
         st.caption(help_text)
-        if score_col not in source_df.columns:
+        if score_col not in history_scope.columns or score_col not in latest_scope.columns:
             st.info(f"{score_col} 列がないため、このグラフは表示できません。")
             return
-        labels = build_top_labels(source_df, score_col, top_n=top_n)
+        labels = build_top_labels(latest_scope, score_col, top_n=top_n)
         if not labels:
             st.info("表示できる履歴データがありません。")
             return
@@ -413,7 +439,7 @@ def show_score_history(watchlist: pd.DataFrame):
             f"表示銘柄（{title}）",
             labels,
             default=labels,
-            key=f"multiselect_{score_col}",
+            key=f"multiselect_{score_col}_{key_suffix}",
             help="初期表示は最新時点の上位5銘柄です。必要に応じて表示銘柄を絞り込めます。",
         )
         selected_symbols = [mapping[label] for label in selected_labels]
@@ -421,9 +447,12 @@ def show_score_history(watchlist: pd.DataFrame):
             st.info("表示銘柄が選択されていません。")
             return
 
+        latest_meta = latest_scope.drop_duplicates("symbol").set_index("symbol")
+        latest_name_map = latest_meta["name"].to_dict() if "name" in latest_meta.columns else {}
+
         fig = go.Figure()
         for sym in selected_symbols:
-            trend = history[history["symbol"] == sym].sort_values("run_date").copy()
+            trend = history_scope[history_scope["symbol"] == sym].sort_values("run_date").copy()
             if trend.empty or score_col not in trend.columns:
                 continue
             name = latest_name_map.get(sym, sym)
@@ -441,6 +470,7 @@ def show_score_history(watchlist: pd.DataFrame):
                     line=dict(width=3),
                 )
             )
+
         max_y = 100 if score_col in {"buy_timing_score", "sell_timing_score"} else None
         fig.update_layout(
             height=420,
@@ -451,41 +481,58 @@ def show_score_history(watchlist: pd.DataFrame):
         )
         st.plotly_chart(fig, use_container_width=True)
 
-        latest_selected = latest[latest["symbol"].isin(selected_symbols)].copy()
-        detail_cols = [
+        latest_selected = latest_scope[latest_scope["symbol"].isin(selected_symbols)].copy()
+        detail_cols = unique_cols([
             col for col in [
-                "run_date", "symbol", "name", score_col,
+                "run_date", "list_name", "symbol", "name", score_col,
                 "buy_timing_score", "buy_timing_label",
                 "sell_timing_score", "sell_timing_label",
                 "score", "raw_score", "status", "unit_price",
                 "ma_deviation_pct", "rsi", "volume_ratio", "return_5d", "return_20d",
             ] if col in latest_selected.columns
-        ]
+        ])
         if not latest_selected.empty and detail_cols:
-            st.dataframe(
-                latest_selected.sort_values(score_col, ascending=False, na_position="last")[detail_cols],
-                use_container_width=True,
-                hide_index=True,
+            display_df = latest_selected.sort_values(score_col, ascending=False, na_position="last")[detail_cols].copy()
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
+
+    st.subheader("CSV別の点数推移")
+    list_names = sorted(history["list_name"].dropna().unique().tolist())
+
+    if len(list_names) > 1:
+        tabs = st.tabs(list_names)
+        iterable = zip(tabs, list_names)
+    else:
+        tabs = [st.container()]
+        iterable = zip(tabs, list_names)
+
+    for tab, list_name in iterable:
+        with tab:
+            history_scope = history[history["list_name"] == list_name].copy()
+            latest_scope = latest_all[latest_all["list_name"] == list_name].copy()
+            st.caption(f"対象CSV: {list_name} / 最新銘柄数: {len(latest_scope)}")
+
+            render_timing_chart(
+                title="買い点数 上位5銘柄の推移",
+                history_scope=history_scope,
+                latest_scope=latest_scope,
+                score_col=buy_score_col,
+                y_title="買い点数",
+                help_text="このCSV内で、最新保存日時点の買い点数上位5銘柄を対象に推移を表示します。",
+                key_suffix=f"{list_name}_buy",
+                top_n=5,
             )
 
-    render_timing_chart(
-        title="買い点数 上位5銘柄の推移",
-        source_df=latest,
-        score_col=buy_score_col,
-        y_title="買い点数",
-        help_text="最新保存日時点の買い点数上位5銘柄を対象に、買い点数の推移を表示します。",
-        top_n=5,
-    )
-
-    if sell_score_col:
-        render_timing_chart(
-            title="売り点数 上位5銘柄の推移",
-            source_df=latest,
-            score_col=sell_score_col,
-            y_title="売り点数",
-            help_text="最新保存日時点の売り点数上位5銘柄を対象に、売り点数の推移を表示します。売り点数が高いほど利確・撤退警戒が強い状態です。",
-            top_n=5,
-        )
+            if sell_score_col:
+                render_timing_chart(
+                    title="売り点数 上位5銘柄の推移",
+                    history_scope=history_scope,
+                    latest_scope=latest_scope,
+                    score_col=sell_score_col,
+                    y_title="売り点数",
+                    help_text="このCSV内で、最新保存日時点の売り点数上位5銘柄を対象に推移を表示します。売り点数が高いほど利確・撤退警戒が強い状態です。",
+                    key_suffix=f"{list_name}_sell",
+                    top_n=5,
+                )
 
     st.subheader("銘柄別の履歴")
     history_symbols = set(history["symbol"])
@@ -498,13 +545,13 @@ def show_score_history(watchlist: pd.DataFrame):
     symbol = selected.split("|")[0].strip()
     one = history[history["symbol"] == symbol].sort_values("run_date").copy()
 
-    detail_cols = [
+    detail_cols = unique_cols([
         col for col in [
-            "run_date", "score", "raw_score", "buy_timing_score", "buy_timing_label",
+            "run_date", "list_name", "score", "raw_score", "buy_timing_score", "buy_timing_label",
             "sell_timing_score", "sell_timing_label", "status", "unit_price", "ma_deviation_pct",
             "rsi", "volume_ratio", "macd_diff", "return_5d", "return_20d",
         ] if col in one.columns
-    ]
+    ])
     st.dataframe(one[detail_cols].sort_values("run_date", ascending=False), use_container_width=True, hide_index=True)
 
 def find_watchlist_files() -> list[str]:
