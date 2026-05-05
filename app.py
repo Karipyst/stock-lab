@@ -2433,9 +2433,16 @@ def show_backtest(watchlist: pd.DataFrame, is_fund_file: bool) -> None:
         st.plotly_chart(fig_reason, use_container_width=True)
 
         st.subheader("トレード明細")
-        detail = trades_df.sort_values("entry_date", ascending=False).copy()
+        detail = trades_df.copy()
+        # Streamlit Cloud / pandas の環境差で、日付列に Timestamp と文字列が混在すると
+        # sort_values() が TypeError になるため、先に datetime64 に正規化する。
         for col in ["entry_date", "exit_date", "signal_date"]:
-            detail[col] = pd.to_datetime(detail[col]).dt.strftime("%Y-%m-%d")
+            if col in detail.columns:
+                detail[col] = pd.to_datetime(detail[col], errors="coerce")
+        detail = detail.sort_values("entry_date", ascending=False, na_position="last").copy()
+        for col in ["entry_date", "exit_date", "signal_date"]:
+            if col in detail.columns:
+                detail[col] = detail[col].dt.strftime("%Y-%m-%d").fillna("")
         detail["entry_price"] = detail["entry_price"].round(2)
         detail["exit_price"] = detail["exit_price"].round(2)
         detail["return_pct"] = detail["return_pct"].round(2)
